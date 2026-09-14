@@ -1,0 +1,16 @@
+[package]
+name = "ok-zim"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lru = "0.18.4"
+md-5 = "0.11.0"
+memchr = "2.8.3"
+memmap2 = "0.9.11"
+thiserror = "2.0.20"
+xz2 = { version = "0.1.7", features = ["static"] }
+zstd = "0.13"
+
+[dev-dependencies]
+tempfile = "3.27.0"
