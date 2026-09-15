@@ -10,6 +10,7 @@ pub mod import;
 mod library;
 pub mod normalize;
 mod stubs;
+pub mod text;
 mod titles;
 
 pub use document::{Document, Target};

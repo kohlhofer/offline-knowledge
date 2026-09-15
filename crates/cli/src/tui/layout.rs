@@ -319,11 +319,9 @@ fn merge(a: Style, b: Style) -> Style {
     Style { bold: a.bold || b.bold, italic: a.italic || b.italic }
 }
 
-/// Removes control characters other than newlines, so article text cannot
-/// send escape sequences to the terminal.
-pub fn sanitize(text: &str) -> String {
-    text.chars().filter(|c| !c.is_control() || *c == '\n').collect()
-}
+/// Moved to `ok_core::text` so the HTML renderer and MCP's plain-text output
+/// share the same control-character stripping the TUI has always done.
+pub use ok_core::text::sanitize;
 
 pub fn display_width(text: &str) -> usize {
     text.chars().map(|c| c.width().unwrap_or(0)).sum()
