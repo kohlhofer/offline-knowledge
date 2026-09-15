@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
 use super::layout::{self as laid, Kind};
+use super::outline::{Outline, ancestors};
 use super::{App, Overlay, Screen};
 
 const ACCENT: Color = Color::Cyan;
@@ -16,9 +17,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         Screen::Article => article(frame, app, body),
     }
     status_bar(frame, app, status);
-    match app.overlay {
+    match &app.overlay {
         Overlay::None => {}
-        Overlay::Outline(selected) => outline(frame, app, body, selected),
+        Overlay::Outline(state) => outline(frame, app, body, state),
         Overlay::Help => help(frame, body),
     }
 }
@@ -136,21 +137,83 @@ fn status_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(line).style(Style::new().bg(Color::Black).fg(Color::Gray)), area);
 }
 
-fn outline(frame: &mut Frame<'_>, app: &App, area: Rect, selected: usize) {
+fn outline(frame: &mut Frame<'_>, app: &App, area: Rect, state: &Outline) {
     let Some(view) = &app.article else { return };
-    let items: Vec<ListItem<'_>> = view
-        .laid
-        .sections
-        .iter()
-        .map(|s| ListItem::new(format!("{}{}", "  ".repeat(usize::from(s.level.saturating_sub(1))), laid::sanitize(&s.heading))))
-        .collect();
-    let popup = centered(area, 60, 80);
+    let sections = &view.laid.sections;
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    let filtering = !state.query.trim().is_empty();
+
+    // Size from every section, filtered or not, so the popup holds still while you type.
+    let widest = (0..sections.len())
+        .map(|i| {
+            let breadcrumb: usize = ancestors(sections, i).iter().map(|a| laid::display_width(a) + 3).sum();
+            laid::display_width(&sections[i].heading) + breadcrumb.max(2 * usize::from(sections[i].level.saturating_sub(2))) + 2
+        })
+        .max()
+        .unwrap_or(0);
+    let popup = if area.width < 70 {
+        area
+    } else {
+        let width = (widest as u16 + 4).clamp(40, area.width.saturating_sub(4));
+        let height = (sections.len() as u16 + 4).clamp(8, area.height.saturating_sub(2));
+        Rect { x: area.x + (area.width - width) / 2, y: area.y + (area.height - height) / 2, width, height }
+    };
     frame.render_widget(Clear, popup);
-    let mut state = ListState::default().with_selected(Some(selected));
-    let list = List::new(items)
-        .block(Block::new().borders(Borders::ALL).title(" Outline · Enter jumps · Esc closes "))
-        .highlight_style(Style::new().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
-    frame.render_stateful_widget(list, popup, &mut state);
+    let title = format!(" Outline · {} of {} ", state.matches.len(), sections.len());
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .title(title)
+        .title_bottom(Line::from(" type to filter · Enter jumps · Esc clears, closes ").style(dim));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let [input, list] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("› ", Style::new().fg(ACCENT)),
+            Span::raw(laid::sanitize(&state.query)),
+            Span::styled("▏", Style::new().fg(ACCENT)),
+        ])),
+        input,
+    );
+    if state.matches.is_empty() {
+        frame.render_widget(Paragraph::new(Span::styled("No section matches.", dim)), list);
+        return;
+    }
+
+    let room = usize::from(list.width);
+    let items: Vec<ListItem<'_>> = state
+        .matches
+        .iter()
+        .map(|&i| {
+            let s = &sections[i];
+            let marker = if i == state.current { "● " } else { "  " };
+            let heading = laid::sanitize(&s.heading);
+            let heading_style = if s.level <= 2 { Style::new().add_modifier(Modifier::BOLD) } else { Style::new() };
+            let mut prefix: Vec<String> = if filtering {
+                ancestors(sections, i).iter().map(|a| format!("{} › ", laid::sanitize(a))).collect()
+            } else {
+                vec!["  ".repeat(usize::from(s.level.saturating_sub(2)))]
+            };
+            // Too wide: keep only the direct parent, then no parent, then cut the heading.
+            let width = |prefix: &[String]| 2 + prefix.iter().map(|p| laid::display_width(p)).sum::<usize>() + laid::display_width(&heading);
+            if filtering && prefix.len() > 1 && width(&prefix) > room {
+                let parent = prefix.pop().expect("more than one breadcrumb");
+                prefix = vec!["… › ".to_string(), parent];
+            }
+            if filtering && !prefix.is_empty() && width(&prefix) > room {
+                prefix = vec!["… › ".to_string()];
+            }
+            let used = 2 + prefix.iter().map(|p| laid::display_width(p)).sum::<usize>();
+            let heading = truncate(&heading, room.saturating_sub(used));
+            let mut spans = vec![Span::styled(marker, Style::new().fg(ACCENT))];
+            spans.extend(prefix.into_iter().map(|p| Span::styled(p, if filtering { dim } else { Style::new() })));
+            spans.push(Span::styled(heading, heading_style));
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    let mut list_state = ListState::default().with_selected(Some(state.selected));
+    let widget = List::new(items).highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+    frame.render_stateful_widget(widget, list, &mut list_state);
 }
 
 fn help(frame: &mut Frame<'_>, area: Rect) {
@@ -167,7 +230,7 @@ fn help(frame: &mut Frame<'_>, area: Rect) {
         ("Tab  Shift-Tab  n  N", "select next or previous link"),
         ("Enter", "follow the selected link"),
         ("Backspace  ←  →", "back, forward"),
-        ("o", "outline of sections"),
+        ("o", "outline: type to filter, Enter jumps"),
         ("/  s", "search"),
         ("r  Ctrl-R", "random article"),
         ("q  Ctrl-C", "quit"),

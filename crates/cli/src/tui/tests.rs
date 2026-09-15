@@ -133,11 +133,85 @@ fn section_redirects_open_at_the_section_and_outline_jumps() {
 
     press(&mut app, KeyCode::Char('g'));
     press(&mut app, KeyCode::Char('o'));
-    assert_eq!(app.overlay, Overlay::Outline(0));
+    assert!(matches!(&app.overlay, Overlay::Outline(o) if o.selected == 0 && o.query.is_empty()));
     press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Enter);
     assert_eq!(app.overlay, Overlay::None);
     assert!(app.article.as_ref().unwrap().scroll > 0);
+}
+
+#[test]
+fn outline_filters_as_you_type_and_jumps() {
+    let (_d, mut app) = app();
+    type_text(&mut app, "albert");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('o'));
+    type_text(&mut app, "LEG");
+    let Overlay::Outline(outline) = &app.overlay else { panic!("outline open") };
+    let sections = &app.article.as_ref().unwrap().laid.sections;
+    let names: Vec<&str> = outline.matches.iter().map(|&i| sections[i].heading.as_str()).collect();
+    assert_eq!(names, ["Legacy"], "letters filter instead of moving or closing");
+
+    // Keys that used to close the outline now edit or move within it.
+    press(&mut app, KeyCode::PageDown);
+    press(&mut app, KeyCode::Backspace);
+    assert!(matches!(&app.overlay, Overlay::Outline(o) if o.query == "LE"));
+
+    press(&mut app, KeyCode::Char('z'));
+    press(&mut app, KeyCode::Enter);
+    assert!(matches!(&app.overlay, Overlay::Outline(o) if o.matches.is_empty()), "Enter with no match keeps the outline open");
+
+    press(&mut app, KeyCode::Esc);
+    assert!(matches!(&app.overlay, Overlay::Outline(o) if o.query.is_empty() && o.matches.len() == sections_len(&app)));
+    type_text(&mut app, "legacy");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.overlay, Overlay::None);
+    let view = app.article.as_ref().unwrap();
+    let max_scroll = view.laid.lines.len().saturating_sub(app.page_height());
+    assert_eq!(view.scroll, view.laid.section_line("Legacy").unwrap().min(max_scroll));
+
+    press(&mut app, KeyCode::Char('o'));
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.overlay, Overlay::None, "Esc with an empty filter closes");
+}
+
+#[test]
+fn outline_popup_holds_still_while_filtering_and_fits_narrow_rows() {
+    let (_d, mut app) = app();
+    type_text(&mut app, "albert");
+    press(&mut app, KeyCode::Enter);
+    let corner = |app: &mut App, w: u16, h: u16| -> (Option<(u16, u16)>, String) {
+        app.resize(w, h);
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| render::draw(f, app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let mut at = None;
+        let mut text = String::new();
+        for y in 0..h {
+            for x in 0..w {
+                if at.is_none() && buffer[(x, y)].symbol() == "┌" {
+                    at = Some((x, y));
+                }
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        (at, text)
+    };
+    press(&mut app, KeyCode::Char('o'));
+    let (before, _) = corner(&mut app, 120, 36);
+    type_text(&mut app, "leg");
+    let (after, text) = corner(&mut app, 120, 36);
+    assert!(before.is_some());
+    assert_eq!(before, after, "the popup does not move as matches shrink");
+    assert!(text.contains("Outline · 1 of"));
+
+    let (_, narrow) = corner(&mut app, 30, 12);
+    assert!(narrow.lines().all(|l| layout::display_width(l) <= 30));
+}
+
+fn sections_len(app: &App) -> usize {
+    app.article.as_ref().unwrap().laid.sections.len()
 }
 
 #[test]
@@ -168,6 +242,11 @@ fn renders_every_screen_without_panicking_at_small_and_large_sizes() {
         terminal.draw(|f| render::draw(f, &mut app)).unwrap();
         press(&mut app, KeyCode::Char('o'));
         terminal.draw(|f| render::draw(f, &mut app)).unwrap();
+        type_text(&mut app, "leg");
+        terminal.draw(|f| render::draw(f, &mut app)).unwrap();
+        type_text(&mut app, "zzz");
+        terminal.draw(|f| render::draw(f, &mut app)).unwrap();
+        press(&mut app, KeyCode::Esc);
         press(&mut app, KeyCode::Esc);
         press(&mut app, KeyCode::Char('?'));
         terminal.draw(|f| render::draw(f, &mut app)).unwrap();
@@ -258,6 +337,9 @@ fn dump_screens_for_review() {
         dump(&mut app, w, h, "06_article_mid_section");
         press(&mut app, KeyCode::Char('o'));
         dump(&mut app, w, h, "07_outline");
+        type_text(&mut app, "views");
+        dump(&mut app, w, h, "07b_outline_filtered_views");
+        press(&mut app, KeyCode::Esc);
         press(&mut app, KeyCode::Esc);
         press(&mut app, KeyCode::Char('?'));
         dump(&mut app, w, h, "08_help");

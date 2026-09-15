@@ -1,6 +1,7 @@
 //! The terminal reader: search as you type, read, follow links, go back.
 
 pub mod layout;
+mod outline;
 mod render;
 
 use std::time::{Duration, Instant};
@@ -11,6 +12,7 @@ use ok_core::document::Link;
 use ok_core::{Library, SearchResult, Suggestion, Target};
 
 use layout::{Laid, layout};
+use outline::Outline;
 
 const SUGGESTIONS: usize = 12;
 const RESULTS: usize = 30;
@@ -42,10 +44,10 @@ pub enum Screen {
     Article,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Overlay {
     None,
-    Outline(usize),
+    Outline(Outline),
     Help,
 }
 
@@ -127,7 +129,7 @@ impl App {
                 // and on whatever screen they were looking at.
                 let place = Place { entry: view.entry, scroll: 0, selected_link: None };
                 let section = view.laid.section_at(view.scroll).and_then(|s| s.anchor.clone());
-                let (screen, overlay, status, timing) = (self.screen, self.overlay, self.status.clone(), self.timing);
+                let (screen, overlay, status, timing) = (self.screen, self.overlay.clone(), self.status.clone(), self.timing);
                 self.load(place, section);
                 (self.screen, self.overlay, self.status, self.timing) = (screen, overlay, status, timing);
             }
@@ -144,13 +146,13 @@ impl App {
             self.random();
             return;
         }
-        match self.overlay {
+        match &self.overlay {
             Overlay::Help => {
                 self.overlay = Overlay::None;
                 return;
             }
-            Overlay::Outline(i) => {
-                self.outline_key(key, i);
+            Overlay::Outline(_) => {
+                self.outline_key(key);
                 return;
             }
             Overlay::None => {}
@@ -267,33 +269,45 @@ impl App {
             KeyCode::Enter => self.follow_selected(),
             KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('b') => self.go_back(),
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('f') => self.go_forward(),
-            KeyCode::Char('o') => {
-                let current = view.laid.sections.iter().rposition(|s| s.line <= view.scroll).unwrap_or(0);
-                self.overlay = Overlay::Outline(current);
-            }
+            KeyCode::Char('o') => self.overlay = Overlay::Outline(Outline::open(&view.laid.sections, view.scroll)),
             KeyCode::Char('r') => self.random(),
             KeyCode::Char('?') => self.overlay = Overlay::Help,
             _ => {}
         }
     }
 
-    fn outline_key(&mut self, key: KeyEvent, selected: usize) {
-        let Some(view) = &mut self.article else {
-            self.overlay = Overlay::None;
-            return;
-        };
-        let count = view.laid.sections.len();
+    /// Letters filter the outline; arrows, Tab and Ctrl-N/P move; Enter jumps.
+    /// Esc clears the filter first and closes the outline second.
+    fn outline_key(&mut self, key: KeyEvent) {
+        let page = self.page_height();
+        let rows = page.saturating_sub(4).max(1) as isize;
+        let Overlay::Outline(mut outline) = std::mem::replace(&mut self.overlay, Overlay::None) else { return };
+        let Some(view) = &mut self.article else { return };
+        let sections = &view.laid.sections;
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Down | KeyCode::Char('j') => self.overlay = Overlay::Outline((selected + 1).min(count.saturating_sub(1))),
-            KeyCode::Up | KeyCode::Char('k') => self.overlay = Overlay::Outline(selected.saturating_sub(1)),
+            KeyCode::Esc if !outline.query.is_empty() => outline.clear(sections),
+            KeyCode::Esc => return,
             KeyCode::Enter => {
-                if let Some(section) = view.laid.sections.get(selected) {
-                    view.scroll = section.line;
+                if let Some(i) = outline.selected_section() {
+                    let max_scroll = view.laid.lines.len().saturating_sub(page);
+                    view.scroll = sections[i].line.min(max_scroll);
+                    return;
                 }
-                self.overlay = Overlay::None;
             }
-            _ => self.overlay = Overlay::None,
+            KeyCode::Down | KeyCode::Tab => outline.move_by(1),
+            KeyCode::Up | KeyCode::BackTab => outline.move_by(-1),
+            KeyCode::Char('n') if ctrl => outline.move_by(1),
+            KeyCode::Char('p') if ctrl => outline.move_by(-1),
+            KeyCode::PageDown => outline.move_by(rows),
+            KeyCode::PageUp => outline.move_by(-rows),
+            KeyCode::Home => outline.move_by(isize::MIN),
+            KeyCode::End => outline.select_last(),
+            KeyCode::Backspace => outline.pop(sections),
+            KeyCode::Char(c) if !ctrl => outline.push(c, sections),
+            _ => {}
         }
+        self.overlay = Overlay::Outline(outline);
     }
 
     fn follow_selected(&mut self) {
