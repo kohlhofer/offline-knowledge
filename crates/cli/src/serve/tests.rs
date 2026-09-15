@@ -179,6 +179,41 @@ async fn static_assets_are_served_with_a_long_cache_lifetime() {
     assert_eq!(res.headers().get("content-type").unwrap(), "text/javascript");
 }
 
+/// A real headless-Chrome DOM dump against the real corpus, proving the JS
+/// actually ran (it sets `data-perf-ready` once `DOMContentLoaded` and the
+/// first `requestAnimationFrame` have both fired). Manual only: needs
+/// `OK_ZIM` and a Chrome binary neither exists in CI nor is exercised by any
+/// other test.
+/// `OK_ZIM=... cargo test -p ok chrome_smoke -- --ignored`
+///
+/// Multi-threaded runtime: `Command::output()` below blocks its OS thread
+/// for the whole Chrome run, which would starve a single-threaded runtime
+/// and the spawned server would never get to accept Chrome's connection.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn chrome_smoke() {
+    let zim = std::env::var("OK_ZIM").expect("OK_ZIM");
+    let library = Library::open(&zim).expect("ok import must have already run");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, router(Arc::new(library))).await;
+    });
+
+    let chrome = std::env::var("CHROME").unwrap_or_else(|_| "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".to_string());
+    for path in ["/", "/wiki/Albert_Einstein"] {
+        // No --virtual-time-budget: paired with --dump-dom it can hang this
+        // Chrome build indefinitely instead of budgeting time as documented.
+        let output = std::process::Command::new(&chrome)
+            .args(["--headless=new", "--disable-gpu", "--no-sandbox", "--dump-dom", &format!("http://{addr}{path}")])
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run {chrome}: {e}"));
+        let dom = String::from_utf8_lossy(&output.stdout);
+        assert!(dom.contains("data-perf-ready"), "JS did not set data-perf-ready for {path}:\n{dom}");
+    }
+    server.abort();
+}
+
 /// A real TCP round trip, not `oneshot()`: proves the router actually binds
 /// and serves over a socket, using bench's own hand-rolled HTTP client so
 /// there is exactly one such client in the codebase.

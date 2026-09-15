@@ -1,5 +1,316 @@
-/* Placeholder shell styling; the full layout lands with the JS commit. */
-body { font-family: system-ui, sans-serif; margin: 0; color: #111; }
-header.chrome { padding: 0.5rem 1rem; border-bottom: 1px solid #ddd; }
-main { padding: 1rem; max-width: 60rem; margin: 0 auto; }
-.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+/* offline-knowledge web UI. No frameworks, no build step. */
+
+:root {
+  color-scheme: light dark;
+  --accent: #2563eb;
+  --border: #d8dbe0;
+  --dim: #6b7280;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  line-height: 1.5;
+  color: #16181c;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* Header chrome: persistent search, breadcrumb, live region */
+
+header.chrome {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: #fff;
+  border-bottom: 1px solid var(--border);
+  padding: 0.6rem 1rem;
+}
+
+.searchbar {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  max-width: 44rem;
+  margin: 0 auto;
+  position: relative;
+}
+
+.searchbar input[type="text"] {
+  flex: 1;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  font-size: 1rem;
+}
+
+.searchbar button {
+  padding: 0.45rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  background: #f3f4f6;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+#suggestions {
+  list-style: none;
+  margin: 0;
+  padding: 0.25rem 0;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  box-shadow: 0 6px 16px rgb(0 0 0 / 12%);
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+#suggestions li {
+  padding: 0.4rem 0.7rem;
+  cursor: pointer;
+}
+
+#suggestions li[aria-selected="true"] {
+  background: var(--accent);
+  color: #fff;
+}
+
+.breadcrumb {
+  max-width: 44rem;
+  margin: 0.25rem auto 0;
+  font-size: 0.85rem;
+  color: var(--dim);
+  min-height: 1.1em;
+}
+
+/* Main content */
+
+main {
+  max-width: 44rem;
+  margin: 0 auto;
+  padding: 1.25rem 1rem 4rem;
+}
+
+.home .count {
+  font-size: 1.1rem;
+}
+
+.hint,
+.home .hint {
+  color: var(--dim);
+}
+
+kbd {
+  border: 1px solid var(--border);
+  border-radius: 0.25rem;
+  padding: 0 0.35rem;
+  font-family: ui-monospace, monospace;
+  font-size: 0.85em;
+}
+
+/* Search results */
+
+.results {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.results li {
+  border-bottom: 1px solid var(--border);
+  padding: 0.7rem 0;
+}
+
+.results a.result {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+}
+
+.results .title {
+  display: block;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.results .summary {
+  display: block;
+  color: var(--dim);
+}
+
+/* Article */
+
+article h1 {
+  font-size: 1.8rem;
+  margin: 0 0 0.6rem;
+}
+
+article h2 {
+  font-size: 1.35rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.2rem;
+  margin-top: 1.6rem;
+}
+
+article h3 {
+  font-size: 1.1rem;
+  margin-top: 1.2rem;
+}
+
+article p {
+  margin: 0.7rem 0;
+}
+
+article a.link {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid rgb(37 99 235 / 35%);
+}
+
+article a.link:hover,
+article a.link:focus-visible {
+  border-bottom-color: var(--accent);
+}
+
+article a.link.missing {
+  color: #b45309;
+  border-bottom-color: rgb(180 83 9 / 35%);
+}
+
+article a.link.external {
+  color: var(--accent);
+}
+
+article .external {
+  color: var(--dim);
+  font-size: 0.85em;
+}
+
+article .hatnote {
+  color: var(--dim);
+  font-style: italic;
+}
+
+article table.facts {
+  float: right;
+  clear: right;
+  width: 16rem;
+  margin: 0 0 1rem 1.25rem;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+  border: 1px solid var(--border);
+}
+
+article table.facts th,
+article table.facts td {
+  border-top: 1px solid var(--border);
+  padding: 0.3rem 0.5rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+article table.facts th[colspan="2"] {
+  background: #f3f4f6;
+  text-align: center;
+}
+
+article table:not(.facts) {
+  border-collapse: collapse;
+  margin: 1rem 0;
+}
+
+article table:not(.facts) th,
+article table:not(.facts) td {
+  border: 1px solid var(--border);
+  padding: 0.35rem 0.6rem;
+}
+
+article pre {
+  background: #f3f4f6;
+  padding: 0.7rem;
+  overflow-x: auto;
+  border-radius: 0.3rem;
+}
+
+@media (max-width: 40rem) {
+  article table.facts {
+    float: none;
+    width: 100%;
+    margin: 1rem 0;
+  }
+}
+
+/* Not-found and error pages */
+
+.not-found .suggestions,
+.error {
+  margin-top: 1rem;
+}
+
+/* Dialogs: outline and help */
+
+dialog {
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 1rem;
+  max-width: 32rem;
+  width: 90vw;
+}
+
+dialog::backdrop {
+  background: rgb(0 0 0 / 35%);
+}
+
+#outline-filter {
+  width: 100%;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 0.3rem;
+  margin-bottom: 0.5rem;
+}
+
+#outline-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+#outline-list li a {
+  display: block;
+  padding: 0.3rem 0.4rem;
+  text-decoration: none;
+  color: inherit;
+  border-radius: 0.25rem;
+}
+
+#outline-list li a[aria-current="true"] {
+  background: #eef2ff;
+  font-weight: 600;
+}
+
+#help dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.3rem 1rem;
+}
+
+#help dt {
+  font-family: ui-monospace, monospace;
+}
