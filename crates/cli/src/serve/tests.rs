@@ -18,7 +18,16 @@ fn page(title: &str, body: &str) -> String {
 
 fn app() -> (tempfile::TempDir, Router) {
     let bytes = ZimBuilder::new()
-        .article("Albert_Einstein", "Albert Einstein", &page("Albert Einstein", r#"<p>A <a href="Physicist">physicist</a>.</p>"#))
+        .article(
+            "Albert_Einstein",
+            "Albert Einstein",
+            &page(
+                "Albert Einstein",
+                r##"<table class="infobox"><tr><th>Born</th><td>1879</td></tr></table>
+                <p>A <a href="Physicist">physicist</a> who knew <a href="Nowhere">nobody here</a> and cited
+                <a href="https://example.org/x">a source</a>.</p>"##,
+            ),
+        )
         .article("Physicist", "Physicist", &page("Physicist", "<p>Studies physics, like Einstein.</p>"))
         .metadata("Title", "Tiny wiki")
         .build();
@@ -110,6 +119,52 @@ async fn api_suggest_returns_title_path_matched_fragment_and_inbound() {
     assert!(hit.get("matched").is_some());
     assert!(hit.get("fragment").is_some());
     assert!(hit.get("inbound").is_some());
+}
+
+#[tokio::test]
+async fn wiki_article_renders_title_infobox_and_breadcrumb() {
+    let (_d, app) = app();
+    let res = get(&app, "/wiki/Albert_Einstein").await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers().get("cache-control").unwrap(), "no-cache");
+    let body = body_text(res).await;
+    assert!(body.contains("<h1 id=\"Albert_Einstein\" data-path=\"Albert Einstein\">Albert Einstein</h1>"), "{body}");
+    assert!(body.contains("class=\"infobox\""), "{body}");
+    assert!(body.contains("<title>Albert Einstein</title>"), "{body}");
+}
+
+#[tokio::test]
+async fn wiki_article_link_safety_missing_is_real_link_external_has_marker_and_norefferer() {
+    let (_d, app) = app();
+    let body = body_text(get(&app, "/wiki/Albert_Einstein").await).await;
+    assert!(body.contains("<a class=\"link missing\" href=\"/wiki/Nowhere\">nobody here</a>"), "{body}");
+    assert!(body.contains("<a class=\"link article\" href=\"/wiki/Physicist\">physicist</a>"), "{body}");
+    assert!(
+        body.contains("<a class=\"link external\" href=\"https://example.org/x\" rel=\"noreferrer\">a source</a>"),
+        "{body}"
+    );
+    assert!(!body.contains("target="), "external links open in the same tab: {body}");
+}
+
+#[tokio::test]
+async fn wiki_unknown_path_is_404_with_suggestions_and_a_search_all_text_link() {
+    let (_d, app) = app();
+    let res = get(&app, "/wiki/Not_A_Real_Page").await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    assert_eq!(res.headers().get("cache-control").unwrap(), "no-cache");
+    let body = body_text(res).await;
+    assert!(body.contains("not in this collection"), "{body}");
+    assert!(body.contains(r#"action="/search""#), "a working search-all-text fallback: {body}");
+}
+
+#[tokio::test]
+async fn random_redirects_to_a_valid_wiki_path() {
+    let (_d, app) = app();
+    let res = get(&app, "/random").await;
+    assert_eq!(res.status(), StatusCode::FOUND);
+    assert_eq!(res.headers().get("cache-control").unwrap(), "no-store");
+    let location = res.headers().get("location").unwrap().to_str().unwrap().to_string();
+    assert!(location == "/wiki/Albert_Einstein" || location == "/wiki/Physicist", "{location}");
 }
 
 #[tokio::test]

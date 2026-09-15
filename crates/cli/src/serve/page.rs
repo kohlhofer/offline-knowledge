@@ -16,21 +16,23 @@ fn esc(s: &str) -> String {
 }
 
 /// The full page: header chrome (persistent search, breadcrumb, live
-/// region), `body`, and the help dialog. `q` prefills the search box.
-pub fn shell(collection_title: &str, q: Option<&str>, body: &str) -> String {
+/// region), `body`, and the help dialog. `page_title` becomes the `<title>`
+/// tag; `collection_title` is the search box's placeholder, constant across
+/// every page. `q` prefills the search box.
+pub fn shell(page_title: &str, collection_title: &str, q: Option<&str>, body: &str) -> String {
     format!(
         r#"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title}</title>
+<title>{page_title}</title>
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
 <header class="chrome">
 <form action="/search" method="get" class="searchbar" role="search">
-<input type="text" name="q" id="search-input" value="{q}" placeholder="Search {title}" autocomplete="off"
+<input type="text" name="q" id="search-input" value="{q}" placeholder="Search {collection_title}" autocomplete="off"
  aria-autocomplete="list" aria-expanded="false" role="combobox" aria-controls="suggestions" aria-owns="suggestions">
 <button type="submit">Search all text</button>
 <ul id="suggestions" role="listbox" hidden></ul>
@@ -55,7 +57,8 @@ pub fn shell(collection_title: &str, q: Option<&str>, body: &str) -> String {
 <script src="/static/app.js" defer></script>
 </body>
 </html>"#,
-        title = esc(collection_title),
+        page_title = esc(page_title),
+        collection_title = esc(collection_title),
         q = esc(q.unwrap_or_default()),
         body = body,
     )
@@ -103,6 +106,41 @@ pub struct SuggestDto {
     pub matched: Option<String>,
     pub fragment: Option<String>,
     pub inbound: u32,
+}
+
+pub fn article_body(html: &str) -> String {
+    format!(r#"<article id="article">{html}</article>"#)
+}
+
+pub struct SuggestionRow {
+    pub title: String,
+    pub path: String,
+}
+
+/// The not-found page: honest about the miss, with up to 5 title suggestions
+/// and a way to fall back to full-text search, both real links/forms that
+/// work with no JS.
+pub fn not_found_body(requested_path: &str, suggestions: &[SuggestionRow]) -> String {
+    let display = requested_path.replace('_', " ");
+    let suggestion_list = if suggestions.is_empty() {
+        String::new()
+    } else {
+        let items: String = suggestions
+            .iter()
+            .map(|s| format!(r#"<li><a href="{href}">{title}</a></li>"#, href = esc(&ok_core::html::wiki_href(&s.path, None)), title = esc(&s.title)))
+            .collect();
+        format!(r#"<p>Maybe one of these:</p><ul class="suggestions">{items}</ul>"#)
+    };
+    format!(
+        r#"<section class="not-found">
+<h1>Not in this collection</h1>
+<p>"{display}" is not in this collection.</p>
+{suggestion_list}
+<form action="/search" method="get"><input type="hidden" name="q" value="{display}"><button type="submit">Search all text for "{display}"</button></form>
+</section>"#,
+        display = esc(&display),
+        suggestion_list = suggestion_list,
+    )
 }
 
 /// A 400 or 500 HTML body. No internal error detail is ever interpolated in.

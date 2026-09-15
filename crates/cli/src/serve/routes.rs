@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
-use ok_core::Library;
+use ok_core::{Library, Resolution};
 use serde::Deserialize;
 
-use super::page::{self, SearchRow, SuggestDto};
+use super::page::{self, SearchRow, SuggestDto, SuggestionRow};
 
 const MAX_QUERY_CHARS: usize = 200;
 
@@ -15,12 +15,12 @@ fn html_ok(cache: &'static str, body: String) -> Response {
 }
 
 pub(super) fn bad_request_html(message: &str) -> Response {
-    let body = page::shell("Error", None, &page::error_body("400 Bad Request", message));
+    let body = page::shell("Error", "Error", None, &page::error_body("400 Bad Request", message));
     (StatusCode::BAD_REQUEST, [(header::CACHE_CONTROL, "no-store")], Html(body)).into_response()
 }
 
 pub(super) fn server_error_html(message: &str) -> Response {
-    let body = page::shell("Error", None, &page::error_body("500 Internal Server Error", message));
+    let body = page::shell("Error", "Error", None, &page::error_body("500 Internal Server Error", message));
     (StatusCode::INTERNAL_SERVER_ERROR, [(header::CACHE_CONTROL, "no-store")], Html(body)).into_response()
 }
 
@@ -34,7 +34,8 @@ pub struct HomeParams {
 }
 
 pub async fn home(State(library): State<Arc<Library>>, Query(params): Query<HomeParams>) -> Response {
-    let body = page::shell(&library.meta().title, params.q.as_deref(), &page::home_body(&library));
+    let title = &library.meta().title;
+    let body = page::shell(title, title, params.q.as_deref(), &page::home_body(&library));
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-store")], Html(body)).into_response()
 }
 
@@ -61,7 +62,10 @@ pub async fn search(State(library): State<Arc<Library>>, Query(params): Query<Se
     .await
     .expect("search task panicked");
     match rows {
-        Ok(rows) => html_ok("no-cache", page::shell(&library.meta().title, Some(&q), &page::search_body(&q, &rows))),
+        Ok(rows) => {
+            let page_title = format!("\"{q}\" — search");
+            html_ok("no-cache", page::shell(&page_title, &library.meta().title, Some(&q), &page::search_body(&q, &rows)))
+        }
         Err(e) => server_error_html(&e.to_string()),
     }
 }
@@ -95,6 +99,57 @@ pub async fn api_suggest(State(library): State<Arc<Library>>, Query(params): Que
         })
         .collect();
     (StatusCode::OK, [(header::CACHE_CONTROL, "no-store")], axum::Json(dtos)).into_response()
+}
+
+enum ArticleOutcome {
+    Found { title: String, html: String },
+    NotFound { suggestions: Vec<SuggestionRow> },
+}
+
+/// Resolution, article load/parse and HTML rendering, all in one blocking
+/// call — the whole reason `/wiki/{path}` is the heavy route.
+fn render_article(library: &Library, path: &str) -> ok_core::Result<ArticleOutcome> {
+    match library.resolve_title(path)? {
+        Resolution::Found(target) => {
+            let doc = library.article(target.entry)?;
+            let html = doc.to_html(&|entry| library.path(entry).ok());
+            Ok(ArticleOutcome::Found { title: doc.title, html })
+        }
+        Resolution::NotFound { suggestions } => {
+            let rows = suggestions.into_iter().filter_map(|s| Some(SuggestionRow { path: library.path(s.article).ok()?, title: s.title })).collect();
+            Ok(ArticleOutcome::NotFound { suggestions: rows })
+        }
+    }
+}
+
+/// The only article route: canonical, shareable `/wiki/{path}` URLs.
+pub async fn wiki_article(State(library): State<Arc<Library>>, AxumPath(path): AxumPath<String>) -> Response {
+    let lib = Arc::clone(&library);
+    let requested = path.clone();
+    let outcome = tokio::task::spawn_blocking(move || render_article(&lib, &requested)).await.expect("wiki_article task panicked");
+    match outcome {
+        Ok(ArticleOutcome::Found { title, html }) => {
+            html_ok("no-cache", page::shell(&title, &library.meta().title, None, &page::article_body(&html)))
+        }
+        Ok(ArticleOutcome::NotFound { suggestions }) => {
+            let body = page::shell("Not found", &library.meta().title, None, &page::not_found_body(&path, &suggestions));
+            (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-cache")], Html(body))
+                .into_response()
+        }
+        Err(e) => server_error_html(&e.to_string()),
+    }
+}
+
+pub async fn random(State(library): State<Arc<Library>>) -> Response {
+    let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
+    match library.random_article(seed).and_then(|entry| library.path(entry).ok()) {
+        Some(path) => (
+            StatusCode::FOUND,
+            [(header::LOCATION, ok_core::html::wiki_href(&path, None)), (header::CACHE_CONTROL, "no-store".to_string())],
+        )
+            .into_response(),
+        None => server_error_html("this collection has no articles"),
+    }
 }
 
 pub async fn static_css() -> impl IntoResponse {

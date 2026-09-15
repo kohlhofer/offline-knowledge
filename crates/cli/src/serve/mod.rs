@@ -40,6 +40,8 @@ pub(crate) fn router(library: Arc<Library>) -> Router {
         .route("/", get(routes::home))
         .route("/search", get(routes::search))
         .route("/api/suggest", get(routes::api_suggest))
+        .route("/wiki/{*path}", get(routes::wiki_article))
+        .route("/random", get(routes::random))
         .route("/static/app.css", get(routes::static_css))
         .route("/static/app.js", get(routes::static_js))
         .with_state(library)
