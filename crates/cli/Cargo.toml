@@ -8,6 +8,7 @@ anyhow = "1.0.104"
 axum = "0.8.9"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 crossterm = "0.29.0"
+hyper-util = { version = "0.1.20", features = ["server-auto", "service", "tokio"] }
 ok-core = { version = "0.1.0", path = "../core" }
 ok-zim = { version = "0.1.0", path = "../zim" }
 ratatui = "0.30.2"
@@ -15,10 +16,10 @@ rmcp = { version = "3.4", features = ["transport-io"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { version = "1.53", features = ["io-util", "macros", "net", "rt-multi-thread"] }
+tower = { version = "0.5.3", features = ["limit", "util"] }
 unicode-width = "0.2.2"
 
 [dev-dependencies]
 http-body-util = "0.1.5"
 rmcp = { version = "3.4", features = ["client"] }
 tempfile = "3.27.0"
-tower = { version = "0.5.3", features = ["util"] }

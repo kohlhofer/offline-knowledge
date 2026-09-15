@@ -268,3 +268,64 @@ async fn real_socket_smoke_test_serves_home_and_an_article() {
 
     server.abort();
 }
+
+/// A client that sends a request line but never finishes its headers (no
+/// blank line) must not hold the connection forever: `accept_loop`'s
+/// header-read timeout, exercised here with a short one instead of
+/// production's ten seconds.
+#[tokio::test]
+async fn half_open_connection_is_closed_after_the_header_read_timeout() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (_d, library) = library();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(super::accept_loop(listener, Arc::new(library), std::time::Duration::from_millis(150)));
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    stream.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n").await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let mut buf = [0u8; 1];
+    let n = stream.read(&mut buf).await.unwrap();
+    assert_eq!(n, 0, "a connection whose headers never finish must be closed by the server");
+
+    server.abort();
+}
+
+/// `ConcurrencyLimitLayer`, applied in isolation to a synthetic slow service:
+/// the real routes all resolve in well under a millisecond, so there is no
+/// window in which an end-to-end request could observe queueing — this
+/// proves the layer this router installs actually bounds concurrency.
+#[tokio::test]
+async fn concurrency_limit_layer_bounds_in_flight_requests() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tower::limit::ConcurrencyLimitLayer;
+    use tower::{Layer, Service};
+
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let max_seen = Arc::new(AtomicUsize::new(0));
+    let (in_flight_for_service, max_seen_for_service) = (Arc::clone(&in_flight), Arc::clone(&max_seen));
+    let service = tower::service_fn(move |_req: ()| {
+        let (in_flight, max_seen) = (Arc::clone(&in_flight_for_service), Arc::clone(&max_seen_for_service));
+        async move {
+            let n = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            max_seen.fetch_max(n, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok::<(), std::convert::Infallible>(())
+        }
+    });
+    let limited = ConcurrencyLimitLayer::new(2).layer(service);
+
+    let mut handles = Vec::new();
+    for _ in 0..6 {
+        let mut svc = limited.clone();
+        handles.push(tokio::spawn(async move { svc.ready().await.unwrap().call(()).await.unwrap() }));
+    }
+    for handle in handles {
+        handle.await.unwrap();
+    }
+    assert!(max_seen.load(Ordering::SeqCst) <= 2, "concurrency cap not enforced: saw {} requests in flight", max_seen.load(Ordering::SeqCst));
+}

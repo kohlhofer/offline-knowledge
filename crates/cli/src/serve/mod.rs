@@ -12,6 +12,7 @@ mod tests;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use axum::Router;
@@ -20,7 +21,21 @@ use axum::http::header;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::server::conn::auto::Builder as ConnBuilder;
+use hyper_util::service::TowerToHyperService;
 use ok_core::Library;
+use tower::limit::ConcurrencyLimitLayer;
+
+/// A client that never finishes sending its request headers (or sends them
+/// one byte at a time) must not hold a connection — and the article it's
+/// mid-request on — open forever. `axum::serve` leaves this unset.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A ceiling well above any legitimate browser's concurrency and well below
+/// the flood level that pushed RSS from 62 to 151 MB in testing: the one
+/// control this unauthenticated, unrate-limited server has on memory use.
+const MAX_CONCURRENT_REQUESTS: usize = 64;
 
 /// Builds its own runtime and blocks on it: `ok serve` is the only reason
 /// this process needs an async executor at all.
@@ -31,8 +46,26 @@ pub fn run(library: Library, bind: SocketAddr) -> Result<()> {
 async fn serve(library: Library, bind: SocketAddr) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
     eprintln!("listening on http://{bind}");
-    axum::serve(listener, router(Arc::new(library))).await?;
-    Ok(())
+    accept_loop(listener, Arc::new(library), HEADER_READ_TIMEOUT).await
+}
+
+/// The accept loop `serve` runs, with the header-read timeout as a parameter
+/// so a test can use a short one instead of waiting out
+/// [`HEADER_READ_TIMEOUT`]. Bypasses `axum::serve` (which builds a
+/// [`ConnBuilder`] with no timer and no header-read timeout of its own) so
+/// this timeout can be set at all.
+async fn accept_loop(listener: tokio::net::TcpListener, library: Arc<Library>, header_read_timeout: Duration) -> Result<()> {
+    let app = router(library);
+    loop {
+        let (stream, _addr) = listener.accept().await?;
+        let app = app.clone();
+        tokio::spawn(async move {
+            let io = TokioIo::new(stream);
+            let mut builder = ConnBuilder::new(TokioExecutor::new());
+            builder.http1().timer(TokioTimer::new()).header_read_timeout(header_read_timeout);
+            let _ = builder.serve_connection_with_upgrades(io, TowerToHyperService::new(app)).await;
+        });
+    }
 }
 
 pub(crate) fn router(library: Arc<Library>) -> Router {
@@ -45,6 +78,7 @@ pub(crate) fn router(library: Arc<Library>) -> Router {
         .route("/static/app.css", get(routes::static_css))
         .route("/static/app.js", get(routes::static_js))
         .with_state(library)
+        .layer(ConcurrencyLimitLayer::new(MAX_CONCURRENT_REQUESTS))
         .layer(middleware::from_fn(security_headers))
 }
 
