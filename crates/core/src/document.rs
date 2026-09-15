@@ -137,7 +137,7 @@ fn classify_href_in(base_dir: &[String], href: &str) -> Option<Href> {
     if let Some(fragment) = href.strip_prefix('#') {
         return Some(Href::Anchor(decode(fragment)));
     }
-    if href.starts_with("//") || href.contains("://") || href.starts_with("mailto:") {
+    if href.starts_with("//") || href.contains("://") || has_uri_scheme(href) {
         return Some(Href::External(href.to_string()));
     }
     let (path_part, fragment) = match href.split_once('#') {
@@ -146,6 +146,20 @@ fn classify_href_in(base_dir: &[String], href: &str) -> Option<Href> {
     };
     let path_part = path_part.split_once('?').map_or(path_part, |(p, _)| p);
     Some(Href::Internal { path: join_relative(base_dir, &decode(path_part)), fragment })
+}
+
+/// Whether `href` opens with an RFC 3986 URI scheme (a letter, then
+/// letters/digits/`+`/`-`/`.`, then `:`): `geo:52.5,13.4`, `tel:+1-555-0100`,
+/// `urn:isbn:0-486-27557-4`, `mailto:` (already matched above, but harmless
+/// to match again). These have no `//` authority, so the checks above miss
+/// them, and without this they read as a relative article path — one click
+/// from a "missing article" link offering to search the URI's own text.
+fn has_uri_scheme(href: &str) -> bool {
+    let Some(colon) = href.find(':') else { return false };
+    let scheme = &href[..colon];
+    !scheme.is_empty()
+        && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
 }
 
 impl Document {

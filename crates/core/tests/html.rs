@@ -92,6 +92,45 @@ fn javascript_scheme_link_renders_inert() {
 }
 
 #[test]
+fn unsafe_schemes_render_inert_including_mixed_case_and_leading_whitespace() {
+    for url in ["data:text/html,<script>alert(1)</script>", "vbscript:msgbox(1)", "JavaScript:alert(1)", " javascript:alert(1)"] {
+        let d = doc(vec![section(1, "Article", vec![Block::Paragraph { content: vec![linked("x", Link::External { url: url.into() })] }])]);
+        let html = d.to_html(&paths);
+        assert!(!html.contains("<a"), "{url} must render inert: {html}");
+    }
+}
+
+#[test]
+fn allowlisted_scheme_check_is_case_insensitive() {
+    let d = doc(vec![section(
+        1,
+        "Article",
+        vec![Block::Paragraph { content: vec![linked("site", Link::External { url: "HTTPS://example.org/x".into() })] }],
+    )]);
+    let html = d.to_html(&paths);
+    assert!(html.contains("<a class=\"link external\""), "an allowed scheme in upper case must still render as a real link: {html}");
+}
+
+/// The real corpus's shape for a coordinate link (Germany's infobox): a
+/// `geo:` URI with no `//` authority. `Document::links()`/the parser already
+/// classify this as `Link::External` (see `document/tests.rs`), not
+/// `Link::Missing` — this asserts the renderer's side of the same fix, that
+/// an unlisted external scheme still renders as inert text, never a
+/// "missing article" link offering to search the raw URI.
+#[test]
+fn non_web_uri_scheme_link_renders_inert_not_a_missing_article_link() {
+    let d = doc(vec![section(
+        1,
+        "Article",
+        vec![Block::Paragraph { content: vec![linked("Berlin", Link::External { url: "geo:52.5,13.4".into() })] }],
+    )]);
+    let html = d.to_html(&paths);
+    assert!(!html.contains("<a"), "{html}");
+    assert!(!html.contains("link missing"), "{html}");
+    assert!(html.contains("Berlin"), "the text still shows, just not as a link: {html}");
+}
+
+#[test]
 fn article_link_resolves_through_the_paths_closure_with_fragment() {
     let d = doc(vec![section(
         1,

@@ -184,6 +184,18 @@ fn classifies_hrefs_relative_to_the_page() {
 }
 
 #[test]
+fn non_web_uri_schemes_are_external_not_a_relative_article_path() {
+    // The real corpus's shape for a coordinate link (Germany's infobox): no
+    // "//" authority, so it would otherwise fall through to Href::Internal
+    // and become a "missing article" link for the coordinate string itself.
+    assert_eq!(classify_href("Germany", "geo:52.516666666666666,13.383333333333333"), Some(Href::External("geo:52.516666666666666,13.383333333333333".into())));
+    assert_eq!(classify_href("Page", "tel:+1-555-0100"), Some(Href::External("tel:+1-555-0100".into())));
+    assert_eq!(classify_href("Page", "urn:isbn:0-486-27557-4"), Some(Href::External("urn:isbn:0-486-27557-4".into())));
+    // A genuine relative path with a colon must still resolve internally.
+    assert_eq!(classify_href("Page", "3:20_(film)"), Some(Href::Internal { path: "3:20_(film)".into(), fragment: None }));
+}
+
+#[test]
 fn invisible_characters_are_dropped_and_unlabeled_facts_print_plainly() {
     let doc = parse(
         "<table class=\"infobox\"><tr><th>Spouses</th><td>Mileva Mari\u{107}<br>\u{200b}(m.&#8203; 1903)</td></tr>\
