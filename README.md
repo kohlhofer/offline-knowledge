@@ -30,7 +30,7 @@ container network create --internal offline      # once: a host-only network wit
 container run -it --rm --network offline -v "$PWD/data:/data" offline-knowledge:dev
 ```
 
-The image is Debian 13 slim plus the `ok` binary. On the `offline` network the container has no route to the internet, and everything works: the reader, `ok bench`, all of it. Import on the Mac or in the container, since the index lands next to the ZIM in `data/`.
+The image is Debian 13 slim plus the `ok` binary. On the `offline` network the container has no route to the internet, and the reader and `ok bench` both work there. So far the import has only run on the Mac; it writes the index next to the ZIM in `data/`, which the container then reads through the mount.
 
 ## Keys
 
