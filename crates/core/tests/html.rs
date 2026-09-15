@@ -128,6 +128,24 @@ fn lead_section_puts_the_first_paragraph_before_the_infobox_aside() {
     assert!(aside_close < second_para, "the rest of the section still follows, in order: {html}");
 }
 
+/// Real corpus shape: `Definition_of_"racial_discrimination"`. The server's
+/// half of the L3/S1 fix is escaping this in the `id`/`data-path`
+/// attributes (unchanged here — `escape_html` already covered `"`); the
+/// client half, that app.js's outline dialog no longer re-interpolates the
+/// browser-decoded quote into an `href` string, lives in
+/// `serve/assets/app.js` and has no automated coverage (no JS test harness
+/// in this repo; verified manually in Chrome).
+#[test]
+fn heading_anchor_containing_a_quote_is_escaped_in_the_id_attribute() {
+    let d = doc(vec![section(2, "Definition of \"racial discrimination\"", vec![])]);
+    let html = d.to_html(&paths);
+    assert!(
+        html.contains("<h2 id=\"Definition_of_&quot;racial_discrimination&quot;\" data-path=\"Definition of &quot;racial discrimination&quot;\">"),
+        "{html}"
+    );
+    assert!(!html.contains("id=\"Definition_of_\"racial_discrimination\"\""), "the raw quote must never appear unescaped inside the attribute: {html}");
+}
+
 #[test]
 fn heading_carries_an_id_and_a_data_path_breadcrumb() {
     // The lead section always has `anchor: None` from the parser, so its id

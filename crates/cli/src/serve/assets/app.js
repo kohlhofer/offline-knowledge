@@ -177,16 +177,28 @@ function articleSections() {
 let outlineQuery = "";
 let currentHeadingId = null;
 
+// Real ZIM anchor ids can contain a `"` (e.g. Definition_of_"racial_discrimination"),
+// which survives into `s.id`/`s.path` as-is once the browser decodes the
+// server's escaped attribute. Rows are built with createElement/setAttribute
+// rather than interpolated into an innerHTML string, so that character can
+// never break out of an attribute value.
 function renderOutline(sections, matches) {
-  const list = matches
-    .map((i) => {
-      const s = sections[i];
-      const indent = " ".repeat(Math.max(0, s.level - 2));
-      const current = s.id === currentHeadingId ? ' aria-current="true"' : "";
-      return `<li><a href="#${s.id}" data-close-outline${current}>${indent}${s.path.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</a></li>`;
-    })
-    .join("");
-  outlineDialog.innerHTML = `<input type="text" id="outline-filter" placeholder="Filter sections" autocomplete="off"><ul id="outline-list">${list}</ul>`;
+  const list = document.createElement("ul");
+  list.id = "outline-list";
+  for (const i of matches) {
+    const s = sections[i];
+    const a = document.createElement("a");
+    a.href = `#${s.id}`;
+    a.dataset.closeOutline = "";
+    if (s.id === currentHeadingId) a.setAttribute("aria-current", "true");
+    const indent = " ".repeat(Math.max(0, s.level - 2));
+    a.textContent = `${indent}${s.path}`;
+    const li = document.createElement("li");
+    li.appendChild(a);
+    list.appendChild(li);
+  }
+  outlineDialog.innerHTML = `<input type="text" id="outline-filter" placeholder="Filter sections" autocomplete="off">`;
+  outlineDialog.appendChild(list);
   outlineDialog.querySelector("#outline-filter").value = outlineQuery;
   outlineDialog.querySelector("[aria-current]")?.scrollIntoView({ block: "center" });
 }
