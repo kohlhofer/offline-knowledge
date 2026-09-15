@@ -191,3 +191,93 @@ fn ctrl_c_quits_from_anywhere() {
     app.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
     assert!(app.quit);
 }
+
+/// Renders real screens from $OK_ZIM into $OK_SCREENS_DIR as text, for design
+/// review. Links show as ‹underlined›, the selected link as «selected», and
+/// highlighted list rows as [row]. Run with:
+/// `OK_ZIM=... OK_SCREENS_DIR=... cargo test -p ok dump_screens -- --ignored`
+#[test]
+#[ignore]
+fn dump_screens_for_review() {
+    use ratatui::style::{Color, Modifier};
+    let zim = std::env::var("OK_ZIM").expect("OK_ZIM");
+    let out = std::path::PathBuf::from(std::env::var("OK_SCREENS_DIR").expect("OK_SCREENS_DIR"));
+    std::fs::create_dir_all(&out).unwrap();
+
+    let dump = |app: &mut App, w: u16, h: u16, name: &str| {
+        app.resize(w, h);
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| render::draw(f, app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let mut text = String::new();
+        for y in 0..h {
+            let mut state = (false, false, false);
+            for x in 0..w {
+                let cell = &buffer[(x, y)];
+                let now = (
+                    cell.modifier.contains(Modifier::UNDERLINED) && cell.bg != Color::Blue,
+                    cell.bg == Color::Blue,
+                    cell.bg == Color::DarkGray,
+                );
+                if now.0 != state.0 { text.push(if now.0 { '‹' } else { '›' }); }
+                if now.1 != state.1 { text.push(if now.1 { '«' } else { '»' }); }
+                if now.2 != state.2 { text.push(if now.2 { '[' } else { ']' }); }
+                state = now;
+                text.push_str(cell.symbol());
+            }
+            if state.0 { text.push('›'); }
+            if state.1 { text.push('»'); }
+            if state.2 { text.push(']'); }
+            text.push('\n');
+        }
+        let file = out.join(format!("{name}_{w}x{h}.txt"));
+        std::fs::write(file, format!("screen: {name}, terminal {w}x{h}\n{}\n{text}", "=".repeat(w as usize))).unwrap();
+    };
+
+    for (w, h) in [(60u16, 20u16), (80, 24), (120, 36), (200, 50)] {
+        let library = Library::open(&zim).unwrap();
+        let mut app = App::new(library, w, h);
+        dump(&mut app, w, h, "01_search_empty");
+        type_text(&mut app, "einst");
+        dump(&mut app, w, h, "02_suggest_einst");
+        app.set_query(String::new());
+        type_text(&mut app, "general relativity");
+        press(&mut app, KeyCode::Tab);
+        dump(&mut app, w, h, "03_fulltext_general_relativity");
+
+        let einstein = app.library.find("Albert_Einstein").unwrap().unwrap();
+        app.navigate(einstein);
+        dump(&mut app, w, h, "04_article_top_albert_einstein");
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Tab);
+        }
+        dump(&mut app, w, h, "05_article_link_selected");
+        let line = app.article.as_ref().unwrap().laid.section_line("Personal_life").unwrap_or(40);
+        app.article.as_mut().unwrap().scroll = line;
+        app.article.as_mut().unwrap().selected_link = None;
+        dump(&mut app, w, h, "06_article_mid_section");
+        press(&mut app, KeyCode::Char('o'));
+        dump(&mut app, w, h, "07_outline");
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Char('?'));
+        dump(&mut app, w, h, "08_help");
+        press(&mut app, KeyCode::Esc);
+
+        if let Some(table) = app.library.find("Periodic_table").unwrap() {
+            app.navigate(table);
+            let view = app.article.as_mut().unwrap();
+            if let Some(i) = view.laid.lines.iter().position(|l| l.text().contains(" │ ")) {
+                view.scroll = i.saturating_sub(2);
+            }
+            dump(&mut app, w, h, "09_article_table_periodic_table");
+        }
+        press(&mut app, KeyCode::Backspace);
+        let view = app.article.as_mut().unwrap();
+        if let Some(i) = view.laid.links.iter().position(|l| matches!(l.link, Link::External { .. })) {
+            view.selected_link = Some(i);
+            view.scroll = view.laid.links[i].line.saturating_sub(3);
+            press(&mut app, KeyCode::Enter);
+            dump(&mut app, w, h, "10_status_after_external_link");
+        }
+    }
+}
