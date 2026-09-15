@@ -159,6 +159,17 @@ fn resolve_title_is_exact_and_never_falls_back_silently() {
 }
 
 #[test]
+fn resolve_title_refuses_a_non_article_entry_that_exists_at_that_path() {
+    let (_dir, lib) = imported();
+    // The path exists in the ZIM (it's a real resource entry), but it isn't
+    // a readable article: `Found` must not name it.
+    match lib.resolve_title("_res_/style.css").unwrap() {
+        Resolution::NotFound { .. } => {}
+        other => panic!("expected NotFound for a non-article path, got {other:?}"),
+    }
+}
+
+#[test]
 fn path_round_trips_a_known_entry() {
     let (_dir, lib) = imported();
     let einstein = lib.find("Albert_Einstein").unwrap().unwrap().entry;

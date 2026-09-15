@@ -16,7 +16,7 @@ fn page(title: &str, body: &str) -> String {
     format!(r#"<html><body><h1>{title}</h1><div id="mw-content-text"><div class="mw-parser-output">{body}</div></div></body></html>"#)
 }
 
-fn app() -> (tempfile::TempDir, Router) {
+fn library() -> (tempfile::TempDir, Library) {
     let bytes = ZimBuilder::new()
         .article(
             "Albert_Einstein",
@@ -29,13 +29,18 @@ fn app() -> (tempfile::TempDir, Router) {
             ),
         )
         .article("Physicist", "Physicist", &page("Physicist", "<p>Studies physics, like Einstein.</p>"))
+        .resource("_res_/style.css", "text/css", b"p{}")
         .metadata("Title", "Tiny wiki")
         .build();
     let dir = tempfile::tempdir().unwrap();
     let zim = dir.path().join("t.zim");
     std::fs::write(&zim, bytes).unwrap();
     import(&zim, &ImportOptions { heap_bytes: 20_000_000 }, &|_| {}).unwrap();
-    let library = Library::open(&zim).unwrap();
+    (dir, Library::open(&zim).unwrap())
+}
+
+fn app() -> (tempfile::TempDir, Router) {
+    let (dir, library) = library();
     (dir, router(Arc::new(library)))
 }
 
@@ -155,6 +160,33 @@ async fn wiki_unknown_path_is_404_with_suggestions_and_a_search_all_text_link() 
     let body = body_text(res).await;
     assert!(body.contains("not in this collection"), "{body}");
     assert!(body.contains(r#"action="/search""#), "a working search-all-text fallback: {body}");
+}
+
+#[tokio::test]
+async fn wiki_non_article_entry_is_404_not_500() {
+    // The path exists (a real CSS resource in the ZIM's article namespace),
+    // but it isn't a readable article; `resolve_title` refuses it, so the
+    // route must land on the 404 page, not a 500.
+    let (_d, app) = app();
+    let res = get(&app, "/wiki/_res_/style.css").await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let body = body_text(res).await;
+    assert!(body.contains("not in this collection"), "{body}");
+}
+
+#[tokio::test]
+async fn internal_error_body_never_leaks_the_error_detail() {
+    let leaky = ok_core::Error::IndexMismatch {
+        index: std::path::PathBuf::from("/Users/alex/private/data.okx"),
+        expected: "abc123".into(),
+        found: "def456".into(),
+    };
+    let res = super::routes::server_error_html(&leaky);
+    assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = body_text(res).await;
+    assert!(!body.contains("/Users/alex/private"), "{body}");
+    assert!(!body.contains("abc123") && !body.contains("def456"), "{body}");
+    assert!(body.contains("500 Internal Server Error"), "{body}");
 }
 
 #[tokio::test]

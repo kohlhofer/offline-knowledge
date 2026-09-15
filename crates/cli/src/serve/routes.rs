@@ -19,8 +19,13 @@ pub(super) fn bad_request_html(message: &str) -> Response {
     (StatusCode::BAD_REQUEST, [(header::CACHE_CONTROL, "no-store")], Html(body)).into_response()
 }
 
-pub(super) fn server_error_html(message: &str) -> Response {
-    let body = page::shell("Error", "Error", None, &page::error_body("500 Internal Server Error", message));
+/// Logs the detail (which can carry a filesystem path, per `ok_core::Error`'s
+/// `NotImported`/`IndexMismatch` variants, or a panicking blocking task's
+/// `JoinError`) to stderr; the response only ever gets one fixed sentence,
+/// matching `page::error_body`'s own "no internal detail" rule.
+pub(super) fn server_error_html(e: impl std::fmt::Display) -> Response {
+    eprintln!("500: {e}");
+    let body = page::shell("Error", "Error", None, &page::error_body("500 Internal Server Error", "Something went wrong loading this page."));
     (StatusCode::INTERNAL_SERVER_ERROR, [(header::CACHE_CONTROL, "no-store")], Html(body)).into_response()
 }
 
@@ -53,21 +58,20 @@ pub async fn search(State(library): State<Arc<Library>>, Query(params): Query<Se
     let limit = params.limit.unwrap_or(30).clamp(1, 50);
     let lib = Arc::clone(&library);
     let query = q.clone();
-    let rows = tokio::task::spawn_blocking(move || -> ok_core::Result<Vec<SearchRow>> {
+    let rows = match tokio::task::spawn_blocking(move || -> ok_core::Result<Vec<SearchRow>> {
         lib.search(&query, limit)?
             .into_iter()
             .map(|r| Ok(SearchRow { title: r.title, path: lib.path(r.article)?, summary: r.summary }))
             .collect()
     })
     .await
-    .expect("search task panicked");
-    match rows {
-        Ok(rows) => {
-            let page_title = format!("\"{q}\" — search");
-            html_ok("no-cache", page::shell(&page_title, &library.meta().title, Some(&q), &page::search_body(&q, &rows)))
-        }
-        Err(e) => server_error_html(&e.to_string()),
-    }
+    {
+        Ok(Ok(rows)) => rows,
+        Ok(Err(e)) => return server_error_html(&e),
+        Err(e) => return server_error_html(e),
+    };
+    let page_title = format!("\"{q}\" — search");
+    html_ok("no-cache", page::shell(&page_title, &library.meta().title, Some(&q), &page::search_body(&q, &rows)))
 }
 
 #[derive(Deserialize)]
@@ -89,7 +93,7 @@ pub async fn api_suggest(State(library): State<Arc<Library>>, Query(params): Que
     let limit = params.limit.unwrap_or(12).clamp(1, 50);
     let hits = match library.suggest(&q, limit) {
         Ok(hits) => hits,
-        Err(e) => return server_error_html(&e.to_string()),
+        Err(e) => return server_error_html(&e),
     };
     let dtos: Vec<SuggestDto> = hits
         .into_iter()
@@ -108,35 +112,42 @@ enum ArticleOutcome {
 
 /// Resolution, article load/parse and HTML rendering, all in one blocking
 /// call — the whole reason `/wiki/{path}` is the heavy route.
+///
+/// `resolve_title` already refuses non-article targets, but `article` is
+/// re-checked defensively: `Error::NotArticle` still means "not found", not
+/// a server error.
 fn render_article(library: &Library, path: &str) -> ok_core::Result<ArticleOutcome> {
-    match library.resolve_title(path)? {
-        Resolution::Found(target) => {
-            let doc = library.article(target.entry)?;
-            let html = doc.to_html(&|entry| library.path(entry).ok());
-            Ok(ArticleOutcome::Found { title: doc.title, html })
-        }
-        Resolution::NotFound { suggestions } => {
-            let rows = suggestions.into_iter().filter_map(|s| Some(SuggestionRow { path: library.path(s.article).ok()?, title: s.title })).collect();
-            Ok(ArticleOutcome::NotFound { suggestions: rows })
-        }
-    }
+    let suggestions = match library.resolve_title(path)? {
+        Resolution::Found(target) => match library.article(target.entry) {
+            Ok(doc) => {
+                let html = doc.to_html(&|entry| library.path(entry).ok());
+                return Ok(ArticleOutcome::Found { title: doc.title, html });
+            }
+            Err(ok_core::Error::NotArticle(_)) => library.suggest(path, 5)?,
+            Err(e) => return Err(e),
+        },
+        Resolution::NotFound { suggestions } => suggestions,
+    };
+    let rows = suggestions.into_iter().filter_map(|s| Some(SuggestionRow { path: library.path(s.article).ok()?, title: s.title })).collect();
+    Ok(ArticleOutcome::NotFound { suggestions: rows })
 }
 
 /// The only article route: canonical, shareable `/wiki/{path}` URLs.
 pub async fn wiki_article(State(library): State<Arc<Library>>, AxumPath(path): AxumPath<String>) -> Response {
     let lib = Arc::clone(&library);
     let requested = path.clone();
-    let outcome = tokio::task::spawn_blocking(move || render_article(&lib, &requested)).await.expect("wiki_article task panicked");
+    let outcome = match tokio::task::spawn_blocking(move || render_article(&lib, &requested)).await {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(e)) => return server_error_html(&e),
+        Err(e) => return server_error_html(e),
+    };
     match outcome {
-        Ok(ArticleOutcome::Found { title, html }) => {
-            html_ok("no-cache", page::shell(&title, &library.meta().title, None, &page::article_body(&html)))
-        }
-        Ok(ArticleOutcome::NotFound { suggestions }) => {
+        ArticleOutcome::Found { title, html } => html_ok("no-cache", page::shell(&title, &library.meta().title, None, &page::article_body(&html))),
+        ArticleOutcome::NotFound { suggestions } => {
             let body = page::shell("Not found", &library.meta().title, None, &page::not_found_body(&path, &suggestions));
             (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-cache")], Html(body))
                 .into_response()
         }
-        Err(e) => server_error_html(&e.to_string()),
     }
 }
 

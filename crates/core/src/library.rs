@@ -118,9 +118,13 @@ impl Library {
     /// Resolves `query` to an article exactly, never falling back to the
     /// closest guess: a path or title/alias typed exactly (case, accents and
     /// underscores folded), or a short list of suggestions when there is no
-    /// exact match.
+    /// exact match. `Found` always names a readable article — a path that
+    /// exists but isn't one (`_res_/style.css`) falls through to suggestions
+    /// rather than a target the caller can't actually load.
     pub fn resolve_title(&self, query: &str) -> Result<Resolution> {
-        if let Some(target) = self.find(&query.replace(' ', "_"))? {
+        if let Some(target) = self.find(&query.replace(' ', "_"))?
+            && self.is_article_entry(target.entry)?
+        {
             return Ok(Resolution::Found(target));
         }
         if let Some(hit) = self.titles.suggest(query, 1).into_iter().next().filter(|h| h.exact) {
@@ -128,6 +132,14 @@ impl Library {
             return Ok(Resolution::Found(Target { entry: hit.target, fragment }));
         }
         Ok(Resolution::NotFound { suggestions: self.suggest(query, 5)? })
+    }
+
+    /// Whether `entry` (already resolved through redirects) is a real,
+    /// readable article: the same `Content` + `text/html` check [`Self::article`]
+    /// makes before parsing, available here without loading the content.
+    fn is_article_entry(&self, entry: u32) -> Result<bool> {
+        let dirent = self.archive.dirent(entry)?;
+        Ok(matches!(dirent.kind, DirentKind::Content { .. }) && self.archive.mime_type(&dirent) == Some("text/html"))
     }
 
     pub fn suggest(&self, query: &str, limit: usize) -> Result<Vec<Suggestion>> {
