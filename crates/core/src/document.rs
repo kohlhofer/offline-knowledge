@@ -25,6 +25,20 @@ pub struct Section {
     pub blocks: Vec<Block>,
 }
 
+impl Section {
+    /// This section alone as plain text: the heading, then every block.
+    pub fn plain_text(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&self.heading);
+        out.push('\n');
+        for block in &self.blocks {
+            block_text(block, &mut out);
+            out.push('\n');
+        }
+        out
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Block {
@@ -149,31 +163,12 @@ impl Document {
     }
 
     fn inlines(&self) -> impl Iterator<Item = &Inline> + '_ {
-        self.sections.iter().flat_map(|s| s.blocks.iter()).flat_map(|b| -> Box<dyn Iterator<Item = &Inline> + '_> {
-            match b {
-                Block::Paragraph { content } | Block::Quote { content } | Block::Note { content } => {
-                    Box::new(content.iter())
-                }
-                Block::List { items, .. } => Box::new(items.iter().flat_map(|i| i.content.iter())),
-                Block::Facts { facts } => Box::new(facts.iter().flat_map(|f| f.value.iter())),
-                Block::Table { rows } => Box::new(rows.iter().flatten().flat_map(|c| c.content.iter())),
-                Block::Code { .. } => Box::new(std::iter::empty()),
-            }
-        })
+        self.sections.iter().flat_map(|s| s.blocks.iter()).flat_map(block_inlines)
     }
 
     /// The article as plain text: headings and blocks separated by newlines.
     pub fn plain_text(&self) -> String {
-        let mut out = String::new();
-        for section in &self.sections {
-            out.push_str(&section.heading);
-            out.push('\n');
-            for block in &section.blocks {
-                block_text(block, &mut out);
-                out.push('\n');
-            }
-        }
-        out
+        self.sections.iter().map(Section::plain_text).collect()
     }
 
     /// The first paragraph, cut at a word boundary near `max_chars`.
@@ -187,6 +182,40 @@ impl Document {
         });
         let text = first.unwrap_or_default();
         truncate_words(text.trim(), max_chars)
+    }
+
+    /// The section at `index` and every following section nested under it
+    /// (level greater than its own), as a half-open range of indices. The
+    /// same look-ahead rule `prune_empty_sections` uses.
+    fn section_range(&self, index: usize) -> std::ops::Range<usize> {
+        let level = self.sections[index].level;
+        let end = self.sections[index + 1..].iter().take_while(|s| s.level > level).count();
+        index..index + 1 + end
+    }
+
+    /// The section at `index`, plus every section nested under it, as text.
+    pub fn section_text(&self, index: usize) -> String {
+        self.sections[self.section_range(index)].iter().map(Section::plain_text).collect()
+    }
+
+    /// Every link in the section at `index` and its nested subsections, in
+    /// reading order.
+    pub fn section_links(&self, index: usize) -> impl Iterator<Item = &Link> + '_ {
+        self.sections[self.section_range(index)]
+            .iter()
+            .flat_map(|s| s.blocks.iter())
+            .flat_map(block_inlines)
+            .filter_map(|i| i.link.as_ref())
+    }
+}
+
+fn block_inlines(block: &Block) -> Box<dyn Iterator<Item = &Inline> + '_> {
+    match block {
+        Block::Paragraph { content } | Block::Quote { content } | Block::Note { content } => Box::new(content.iter()),
+        Block::List { items, .. } => Box::new(items.iter().flat_map(|i| i.content.iter())),
+        Block::Facts { facts } => Box::new(facts.iter().flat_map(|f| f.value.iter())),
+        Block::Table { rows } => Box::new(rows.iter().flatten().flat_map(|c| c.content.iter())),
+        Block::Code { .. } => Box::new(std::iter::empty()),
     }
 }
 
@@ -230,7 +259,9 @@ fn block_text(block: &Block, out: &mut String) {
     }
 }
 
-fn truncate_words(text: &str, max_chars: usize) -> String {
+/// Cuts `text` at a word boundary near `max_chars`, appending `…` when it
+/// truncated.
+pub fn truncate_words(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
     }

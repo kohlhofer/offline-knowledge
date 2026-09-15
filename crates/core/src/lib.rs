@@ -6,6 +6,7 @@
 pub mod document;
 mod error;
 mod fulltext;
+pub mod html;
 pub mod import;
 mod library;
 pub mod normalize;
@@ -15,4 +16,4 @@ mod titles;
 
 pub use document::{Document, Target};
 pub use error::{Error, Result};
-pub use library::{Library, SearchResult, Suggestion};
+pub use library::{Library, Resolution, SearchResult, Suggestion};

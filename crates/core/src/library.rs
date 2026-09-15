@@ -43,6 +43,14 @@ pub struct SearchResult {
     pub score: f32,
 }
 
+/// The result of [`Library::resolve_title`]: an exact match, or suggestions
+/// when there isn't one. Never a silent fallback to the closest guess.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resolution {
+    Found(Target),
+    NotFound { suggestions: Vec<Suggestion> },
+}
+
 impl Library {
     pub fn open(zim_path: impl AsRef<Path>) -> Result<Library> {
         let zim_path = zim_path.as_ref().to_path_buf();
@@ -100,6 +108,26 @@ impl Library {
 
     pub fn title(&self, entry: u32) -> Result<String> {
         Ok(self.archive.dirent(entry)?.title_str())
+    }
+
+    /// The path (no namespace) of an entry, for building `/wiki/{path}` links.
+    pub fn path(&self, entry: u32) -> Result<String> {
+        Ok(self.archive.dirent(entry)?.path_str())
+    }
+
+    /// Resolves `query` to an article exactly, never falling back to the
+    /// closest guess: a path or title/alias typed exactly (case, accents and
+    /// underscores folded), or a short list of suggestions when there is no
+    /// exact match.
+    pub fn resolve_title(&self, query: &str) -> Result<Resolution> {
+        if let Some(target) = self.find(&query.replace(' ', "_"))? {
+            return Ok(Resolution::Found(target));
+        }
+        if let Some(hit) = self.titles.suggest(query, 1).into_iter().next().filter(|h| h.exact) {
+            let fragment = self.stubs.get(hit.entry).and_then(|t| t.fragment);
+            return Ok(Resolution::Found(Target { entry: hit.target, fragment }));
+        }
+        Ok(Resolution::NotFound { suggestions: self.suggest(query, 5)? })
     }
 
     pub fn suggest(&self, query: &str, limit: usize) -> Result<Vec<Suggestion>> {

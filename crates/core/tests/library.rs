@@ -1,9 +1,9 @@
 use std::io::Write;
 use std::sync::Mutex;
 
-use ok_core::document::{Block, Link};
+use ok_core::document::{Block, Link, Target};
 use ok_core::import::{ImportOptions, Progress, import};
-use ok_core::{Error, Library};
+use ok_core::{Error, Library, Resolution};
 use ok_zim::write::ZimBuilder;
 
 fn page(title: &str, body: &str) -> String {
@@ -129,6 +129,40 @@ fn articles_parse_with_links_resolved_through_redirects() {
 
     let css = lib.archive().find_by_path(b'C', b"_res_/style.css").unwrap().unwrap();
     assert!(matches!(lib.article(css), Err(Error::NotArticle(_))));
+}
+
+#[test]
+fn resolve_title_is_exact_and_never_falls_back_silently() {
+    let (_dir, lib) = imported();
+    let einstein = lib.find("Albert_Einstein").unwrap().unwrap().entry;
+
+    assert_eq!(lib.resolve_title("Albert_Einstein").unwrap(), Resolution::Found(Target { entry: einstein, fragment: None }), "exact path");
+
+    // Case-folding exact match through the redirect's title, not the path.
+    assert_eq!(lib.resolve_title("einstein").unwrap(), Resolution::Found(Target { entry: einstein, fragment: None }));
+
+    // A section redirect's title resolves exactly, fragment included.
+    assert_eq!(
+        lib.resolve_title("Einstein early life").unwrap(),
+        Resolution::Found(Target { entry: einstein, fragment: Some("Life".into()) })
+    );
+
+    match lib.resolve_title("zzzzz not a title").unwrap() {
+        Resolution::NotFound { suggestions } => assert!(suggestions.is_empty(), "{suggestions:?}"),
+        other => panic!("expected NotFound, got {other:?}"),
+    }
+    // A prefix match ("Einst...") is not an exact match: no silent fallback.
+    match lib.resolve_title("Einst").unwrap() {
+        Resolution::NotFound { suggestions } => assert!(!suggestions.is_empty()),
+        other => panic!("expected NotFound with suggestions, got {other:?}"),
+    }
+}
+
+#[test]
+fn path_round_trips_a_known_entry() {
+    let (_dir, lib) = imported();
+    let einstein = lib.find("Albert_Einstein").unwrap().unwrap().entry;
+    assert_eq!(lib.path(einstein).unwrap(), "Albert_Einstein");
 }
 
 #[test]

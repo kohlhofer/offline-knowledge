@@ -8,7 +8,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use ok_core::import::{ImportOptions, Progress, import};
-use ok_core::{Library, Target};
+use ok_core::{Library, Resolution, Target};
 
 /// Offline knowledge: fast search and reading for ZIM files.
 #[derive(Parser)]
@@ -92,10 +92,13 @@ fn main() -> Result<()> {
         Command::Show { title, json } => {
             let library = open(&zim)?;
             let wanted = title.join(" ");
-            let target = match library.find(&wanted.replace(' ', "_"))? {
-                Some(t) => t,
-                None => match library.suggest(&wanted, 1)?.into_iter().next() {
-                    Some(s) => Target { entry: s.article, fragment: s.fragment },
+            let target = match library.resolve_title(&wanted)? {
+                Resolution::Found(t) => t,
+                Resolution::NotFound { suggestions } => match suggestions.into_iter().next() {
+                    Some(s) => {
+                        eprintln!("no exact match for \"{wanted}\"; showing the closest title instead: \"{}\"", s.title);
+                        Target { entry: s.article, fragment: s.fragment }
+                    }
                     None => bail!("no article matches \"{wanted}\""),
                 },
             };

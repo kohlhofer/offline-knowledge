@@ -209,3 +209,56 @@ fn falls_back_to_body_and_given_title() {
     assert_eq!(doc.title, "Given");
     assert!(matches!(&doc.sections[0].blocks[0], Block::Paragraph { content } if inline_text(content) == "Plain page"));
 }
+
+fn text_inline(s: &str) -> Inline {
+    Inline { text: s.into(), style: Style::default(), link: None }
+}
+
+#[test]
+fn section_plain_text_keeps_multi_byte_utf8_near_a_boundary() {
+    // "Poincaré" carries a 2-byte UTF-8 character right before the newline
+    // that plain_text appends, exercising a boundary a byte-based cut would split.
+    let section = Section {
+        level: 2,
+        heading: "Life".into(),
+        anchor: Some("Life".into()),
+        blocks: vec![Block::Paragraph { content: vec![text_inline("Henri Poincaré")] }],
+    };
+    assert_eq!(section.plain_text(), "Life\nHenri Poincaré\n\n");
+}
+
+fn link(entry: u32) -> Inline {
+    Inline { text: "l".into(), style: Style::default(), link: Some(Link::Article { entry, fragment: None }) }
+}
+
+fn nested_doc() -> Document {
+    Document {
+        entry: 1,
+        path: "P".into(),
+        title: "Title".into(),
+        sections: vec![
+            Section { level: 1, heading: "Lead".into(), anchor: None, blocks: vec![Block::Paragraph { content: vec![link(100)] }] },
+            Section { level: 2, heading: "A".into(), anchor: Some("A".into()), blocks: vec![Block::Paragraph { content: vec![link(1)] }] },
+            Section { level: 3, heading: "A.1".into(), anchor: Some("A.1".into()), blocks: vec![Block::Paragraph { content: vec![link(2)] }] },
+            Section { level: 2, heading: "B".into(), anchor: Some("B".into()), blocks: vec![Block::Paragraph { content: vec![link(3)] }] },
+        ],
+    }
+}
+
+#[test]
+fn section_text_and_links_include_nested_subsections_and_stop_at_the_next_sibling() {
+    let doc = nested_doc();
+    let text = doc.section_text(1);
+    assert!(text.contains('A') && text.contains("A.1"), "{text:?}");
+    assert!(!text.contains('B'), "section 1 (\"A\") must not pull in its sibling \"B\": {text:?}");
+
+    let links: Vec<u32> = doc.section_links(1).filter_map(|l| match l { Link::Article { entry, .. } => Some(*entry), _ => None }).collect();
+    assert_eq!(links, [1, 2], "links from \"A\" and its nested \"A.1\", not \"B\"");
+
+    // Section 0 is the level-1 root: every other section nests under it, so
+    // it covers the whole document, matching Document::links()/plain_text().
+    let lead_links: Vec<u32> =
+        doc.section_links(0).filter_map(|l| match l { Link::Article { entry, .. } => Some(*entry), _ => None }).collect();
+    assert_eq!(lead_links, [100, 1, 2, 3]);
+    assert_eq!(doc.section_text(0), doc.plain_text());
+}
