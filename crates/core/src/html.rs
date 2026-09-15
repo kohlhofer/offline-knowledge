@@ -268,13 +268,13 @@ fn render_link(link: &Link, paths: &dyn Fn(u32) -> Option<String>) -> (String, S
     match link {
         Link::Article { entry, fragment } => match paths(*entry) {
             Some(path) => {
-                let href = format!("/wiki/{}{}", encode(&path), fragment.as_deref().map(|f| format!("#{}", encode(f))).unwrap_or_default());
+                let href = wiki_href(&path, fragment.as_deref());
                 (format!("<a class=\"link article\" href=\"{}\">", escape_html(&href)), "</a>".to_string())
             }
             None => (String::new(), String::new()),
         },
         Link::Missing { path } => {
-            let href = format!("/wiki/{}", encode(path));
+            let href = wiki_href(path, None);
             (format!("<a class=\"link missing\" href=\"{}\">", escape_html(&href)), "</a>".to_string())
         }
         Link::Anchor { fragment } => (format!("<a href=\"#{}\">", escape_html(&encode(fragment))), "</a>".to_string()),
@@ -308,7 +308,17 @@ fn encode(path: &str) -> String {
     utf8_percent_encode(path, PATH_SAFE).to_string()
 }
 
-fn escape_html(s: &str) -> String {
+/// A percent-encoded `/wiki/{path}[#fragment]` href, the canonical URL for
+/// an article. Shared by the article renderer above and `ok serve`'s route
+/// handlers, so there is exactly one place that knows how a path becomes a URL.
+pub fn wiki_href(path: &str, fragment: Option<&str>) -> String {
+    format!("/wiki/{}{}", encode(path), fragment.map(|f| format!("#{}", encode(f))).unwrap_or_default())
+}
+
+/// Escapes `&`, `<`, `>`, `"` and `'`. Every piece of ZIM-sourced or
+/// user-supplied text this crate or a frontend writes into HTML goes through
+/// this (after [`crate::text::sanitize`]) rather than a one-off escaper.
+pub fn escape_html(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {

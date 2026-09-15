@@ -1,7 +1,9 @@
 mod bench;
+mod serve;
 mod tui;
 
 use std::io::Write;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -56,6 +58,11 @@ enum Command {
         samples: usize,
         #[arg(long)]
         json: bool,
+    },
+    /// Serve the web UI.
+    Serve {
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        bind: SocketAddr,
     },
 }
 
@@ -120,6 +127,7 @@ fn main() -> Result<()> {
             let library = open(&zim)?;
             bench::run(&library, started.elapsed(), samples, json)
         }
+        Command::Serve { bind } => serve::run(open(&zim)?, bind),
     }
 }
 
