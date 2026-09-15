@@ -10,12 +10,16 @@ start. The plan lives in the engineering knowledge base:
 - `crates/zim` (`ok-zim`): read-only ZIM reader. Memory-mapped, bounded against
   hostile files, verified against libzim. `write.rs` is a test-only writer.
 - `crates/core` (`ok-core`): import (title FST, section redirects, inbound links,
-  Tantivy full text), the document model, and `Library`, the API every frontend uses.
+  Tantivy full text), the document model, `html.rs` (Document→HTML, the one place
+  that renders ZIM content back into markup), `text::sanitize` (shared control-character
+  stripping), and `Library`, the API every frontend uses.
 - `crates/cli` (`ok`): the binary. `import`, `tui` (default), `suggest`, `search`,
-  `show`, `bench`.
+  `show`, `bench` (`--http` benches `serve` on an ephemeral port), `serve` (the web UI,
+  `axum`), `mcp` (three tools over stdio, `rmcp`).
 
-Frontends stay thin. Anything a second frontend (HTTP, MCP) would need goes in
-`ok-core`, not in the TUI.
+Frontends stay thin. Anything a second frontend needs goes in `ok-core`, not in the
+TUI — `resolve_title`, `Library::path`, `Section`/`Document`'s section-range methods
+and `html.rs` all moved there for exactly this reason when `serve` and `mcp` were built.
 
 ## Commands
 
@@ -38,5 +42,7 @@ cargo build --release -p ok
 - `data/`, `testdata/`, `logs/` and `target/` are not committed.
 - Numbers in the README carry their machine. Re-run `ok bench` after anything that
   touches the read path and update them.
-- Text from a ZIM file is untrusted: the TUI strips control characters before it
-  reaches the terminal, and any future MCP surface must present article text as data.
+- Text from a ZIM file is untrusted: `ok-core::text::sanitize` strips control characters
+  before text reaches the terminal (TUI), a response body (`serve`, escaped too) or MCP
+  tool output (plain text). `serve`'s external-link scheme allowlist (http/https/mailto)
+  is the same rule applied to hrefs, not just to the text around them.
