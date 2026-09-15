@@ -1,10 +1,12 @@
 mod bench;
+mod mcp;
 mod serve;
 mod tui;
 
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
@@ -67,6 +69,8 @@ enum Command {
         #[arg(long, default_value = "127.0.0.1:8080")]
         bind: SocketAddr,
     },
+    /// Run the MCP server over stdio.
+    Mcp,
 }
 
 fn main() -> Result<()> {
@@ -127,10 +131,11 @@ fn main() -> Result<()> {
         }
         Command::Bench { samples, json, http } => {
             let started = Instant::now();
-            let library = std::sync::Arc::new(open(&zim)?);
+            let library = Arc::new(open(&zim)?);
             bench::run(library, started.elapsed(), samples, json, http)
         }
         Command::Serve { bind } => serve::run(open(&zim)?, bind),
+        Command::Mcp => mcp::run(open(&zim)?),
     }
 }
 
