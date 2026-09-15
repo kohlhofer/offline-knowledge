@@ -58,6 +58,9 @@ enum Command {
         samples: usize,
         #[arg(long)]
         json: bool,
+        /// Also bench `serve`'s HTTP routes on an ephemeral loopback port.
+        #[arg(long)]
+        http: bool,
     },
     /// Serve the web UI.
     Serve {
@@ -122,10 +125,10 @@ fn main() -> Result<()> {
             eprintln!("loaded and parsed in {:.2} ms", took.as_secs_f64() * 1000.0);
             Ok(())
         }
-        Command::Bench { samples, json } => {
+        Command::Bench { samples, json, http } => {
             let started = Instant::now();
-            let library = open(&zim)?;
-            bench::run(&library, started.elapsed(), samples, json)
+            let library = std::sync::Arc::new(open(&zim)?);
+            bench::run(library, started.elapsed(), samples, json, http)
         }
         Command::Serve { bind } => serve::run(open(&zim)?, bind),
     }

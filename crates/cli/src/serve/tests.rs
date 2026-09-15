@@ -178,3 +178,26 @@ async fn static_assets_are_served_with_a_long_cache_lifetime() {
     let res = get(&app, "/static/app.js").await;
     assert_eq!(res.headers().get("content-type").unwrap(), "text/javascript");
 }
+
+/// A real TCP round trip, not `oneshot()`: proves the router actually binds
+/// and serves over a socket, using bench's own hand-rolled HTTP client so
+/// there is exactly one such client in the codebase.
+#[tokio::test]
+async fn real_socket_smoke_test_serves_home_and_an_article() {
+    let (_d, router) = app();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let home = crate::bench::http_get(addr, "/").await.unwrap();
+    assert_eq!(home.status, 200);
+    assert!(String::from_utf8_lossy(&home.body).contains("Tiny wiki"), "{}", String::from_utf8_lossy(&home.body));
+
+    let article = crate::bench::http_get(addr, "/wiki/Albert_Einstein").await.unwrap();
+    assert_eq!(article.status, 200);
+    assert!(String::from_utf8_lossy(&article.body).contains("Albert Einstein"));
+
+    server.abort();
+}
