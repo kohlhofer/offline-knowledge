@@ -274,3 +274,10 @@ fn section_text_and_links_include_nested_subsections_and_stop_at_the_next_siblin
     assert_eq!(lead_links, [100, 1, 2, 3]);
     assert_eq!(doc.section_text(0), doc.plain_text());
 }
+
+#[test]
+#[should_panic]
+fn section_text_panics_on_an_out_of_range_index_per_its_documented_precondition() {
+    let doc = nested_doc();
+    doc.section_text(doc.sections.len());
+}

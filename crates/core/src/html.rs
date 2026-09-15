@@ -271,7 +271,11 @@ fn render_link(link: &Link, paths: &dyn Fn(u32) -> Option<String>) -> (String, S
                 let href = wiki_href(&path, fragment.as_deref());
                 (format!("<a class=\"link article\" href=\"{}\">", escape_html(&href)), "</a>".to_string())
             }
-            None => (String::new(), String::new()),
+            // `paths` has no path to offer (a stale or dangling entry index):
+            // marked the same as a known-missing link rather than silently
+            // dropped to unstyled plain text — just not a real anchor, since
+            // there is no href to give it.
+            None => ("<span class=\"link missing\">".to_string(), "</span>".to_string()),
         },
         Link::Missing { path } => {
             let href = wiki_href(path, None);
@@ -280,8 +284,9 @@ fn render_link(link: &Link, paths: &dyn Fn(u32) -> Option<String>) -> (String, S
         Link::Anchor { fragment } => (format!("<a href=\"#{}\">", escape_html(&encode(fragment))), "</a>".to_string()),
         Link::External { url } => {
             if is_allowed_scheme(url) {
-                let marker = format!("</a><span class=\"external\"> ↗ {}</span>", escape_html(&domain_of(url)));
-                (format!("<a class=\"link external\" href=\"{}\" rel=\"noreferrer\">", escape_html(url)), marker)
+                let url = sanitize(url);
+                let marker = format!("</a><span class=\"external\"> ↗ {}</span>", escape_html(&sanitize(&domain_of(&url))));
+                (format!("<a class=\"link external\" href=\"{}\" rel=\"noreferrer\">", escape_html(&url)), marker)
             } else {
                 (String::new(), String::new())
             }

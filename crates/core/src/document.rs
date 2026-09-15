@@ -208,12 +208,18 @@ impl Document {
     }
 
     /// The section at `index`, plus every section nested under it, as text.
+    ///
+    /// Panics if `index >= self.sections.len()`: every caller in this
+    /// codebase resolves `index` against `self.sections.len()` first (see
+    /// `mcp::tools::resolve_section`); a caller outside it must do the same.
     pub fn section_text(&self, index: usize) -> String {
         self.sections[self.section_range(index)].iter().map(Section::plain_text).collect()
     }
 
     /// Every link in the section at `index` and its nested subsections, in
     /// reading order.
+    ///
+    /// Panics if `index >= self.sections.len()`; see [`Self::section_text`].
     pub fn section_links(&self, index: usize) -> impl Iterator<Item = &Link> + '_ {
         self.sections[self.section_range(index)]
             .iter()

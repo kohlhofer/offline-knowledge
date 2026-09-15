@@ -80,6 +80,19 @@ fn allowlisted_external_link_is_a_real_anchor_with_noreferrer_and_no_target() {
 }
 
 #[test]
+fn external_link_href_and_domain_marker_are_sanitized() {
+    let d = doc(vec![section(
+        1,
+        "Article",
+        vec![Block::Paragraph { content: vec![linked("site", Link::External { url: "https://exa\u{7}mple.org/x".into() })] }],
+    )]);
+    let html = d.to_html(&paths);
+    assert!(html.contains("<a class=\"link external\" href=\"https://example.org/x\" rel=\"noreferrer\">site</a>"), "{html}");
+    assert!(!html.contains('\u{7}'), "the BEL control character must not reach the response: {html}");
+    assert!(html.contains("example.org"), "{html}");
+}
+
+#[test]
 fn javascript_scheme_link_renders_inert() {
     let d = doc(vec![section(
         1,
@@ -139,6 +152,18 @@ fn article_link_resolves_through_the_paths_closure_with_fragment() {
     )]);
     let html = d.to_html(&paths);
     assert!(html.contains("<a class=\"link article\" href=\"/wiki/Other_Article#Life\">other</a>"), "{html}");
+}
+
+#[test]
+fn article_link_whose_path_lookup_fails_renders_as_missing_not_silently_as_plain_text() {
+    let d = doc(vec![section(
+        1,
+        "Article",
+        vec![Block::Paragraph { content: vec![linked("gone", Link::Article { entry: 99, fragment: None })] }],
+    )]);
+    let html = d.to_html(&paths);
+    assert!(html.contains("<span class=\"link missing\">gone</span>"), "{html}");
+    assert!(!html.contains("<a"), "no real link when the path lookup failed: {html}");
 }
 
 #[test]
