@@ -47,6 +47,16 @@ fn wiki() -> Vec<u8> {
             "Einstein early life",
             r#"<html><head><meta http-equiv="refresh" content="0;URL='./Albert_Einstein#Life'" /></head><body></body></html>"#,
         )
+        // A section redirect whose fragment matches no real section in its
+        // target (a stale link, or one written for a since-renamed
+        // heading) — covers L7's fallback-to-overview behavior. Named to
+        // avoid "einstein", so it doesn't become a third title hit for the
+        // "einstein" query the search tests below rely on.
+        .article(
+            "Stale_reference",
+            "Stale reference",
+            r#"<html><head><meta http-equiv="refresh" content="0;URL='./Albert_Einstein#Nonexistent_Section'" /></head><body></body></html>"#,
+        )
         .redirect("Einstein", "Einstein", "Albert_Einstein")
         .metadata("Title", "Tiny wiki")
         .build()
@@ -84,19 +94,48 @@ fn search_empty_query_is_an_error() {
 }
 
 #[test]
-fn read_without_section_shows_lead_facts_and_outline() {
+fn search_header_names_the_next_step_or_the_truncation() {
+    assert_eq!(tools::search_header(0, 0, "zzz"), "0 shown for \"zzz\" — try different words, or fewer of them");
+    assert_eq!(tools::search_header(3, 3, "x"), "3 shown for \"x\"");
+    assert_eq!(tools::search_header(2, 5, "x"), "2 shown of 5 for \"x\"");
+}
+
+#[test]
+fn search_skips_fulltext_when_title_hits_already_fill_the_limit() {
+    let (_d, library) = imported();
+    // "einstein" alone at limit=1 is satisfied by the title/alias hit — the
+    // full-text query is never reached (L16). Its output is unaffected by
+    // the skip either way, since a filled limit truncates extra hits away
+    // regardless; this pins that preserved contract.
+    let text = tools::search_text(&library, "einstein", 1).unwrap();
+    assert!(text.contains("Albert Einstein"), "{text}");
+    assert_eq!(text.lines().count(), 2, "header plus exactly one result: {text}");
+}
+
+#[test]
+fn read_without_section_shows_lead_facts_and_a_top_level_outline() {
     let (_d, library) = imported();
     let text = tools::read_text(&library, "Albert Einstein", None, None).unwrap();
     assert!(text.starts_with("Albert Einstein · "), "{text}");
     assert!(text.contains("physicist who developed"), "{text}");
     assert!(text.contains("Born: 1879"), "{text}");
     assert!(text.contains("Died: 1955"), "{text}");
+    assert!(text.contains("<article-text>") && text.contains("</article-text>"), "the lead prose is fenced: {text}");
     assert!(text.contains("Sections:"), "{text}");
     assert!(text.contains("0  Albert Einstein ("), "{text}");
     assert!(text.contains("1  Life ("), "{text}");
-    assert!(text.contains("2    Early life ("), "level 3 gets extra indent: {text}");
+    assert!(text.contains("+1 subsections"), "the nested \"Early life\" is summarized, not spelled out: {text}");
+    assert!(!text.contains("Early life ("), "a level-3 heading doesn't appear at the top level: {text}");
+    assert!(text.contains("section=\"outline\""), "says how to get the rest: {text}");
     // The lead's own paragraphs only — no facts/list markup leaking into it.
     assert!(!text.contains("Born in Ulm"), "the Life section's body must not appear in the overview: {text}");
+}
+
+#[test]
+fn read_section_outline_keyword_returns_the_full_outline() {
+    let (_d, library) = imported();
+    let text = tools::read_text(&library, "Albert Einstein", Some("outline"), None).unwrap();
+    assert!(text.contains("2    Early life ("), "the full outline lists every section, nested ones included: {text}");
 }
 
 #[test]
@@ -109,11 +148,32 @@ fn read_section_by_index_and_by_heading_resolve_the_same_section() {
 }
 
 #[test]
+fn read_section_does_not_print_the_heading_twice() {
+    let (_d, library) = imported();
+    let text = tools::read_text(&library, "Albert Einstein", Some("Life"), None).unwrap();
+    assert_eq!(text.matches("Life").count(), 1, "\"Life\" the heading appears once, not once in the header and again in the body: {text}");
+}
+
+#[test]
 fn read_section_redirect_with_no_explicit_section_opens_that_section() {
     let (_d, library) = imported();
     let text = tools::read_text(&library, "Einstein early life", None, None).unwrap();
     assert!(text.starts_with("Life ("), "{text}");
     assert!(text.contains("Born in Ulm"), "{text}");
+}
+
+#[test]
+fn read_section_redirect_with_an_unmatched_fragment_falls_back_to_the_overview() {
+    let (_d, library) = imported();
+    let text = tools::read_text(&library, "Stale reference", None, None).unwrap();
+    assert!(text.starts_with("Albert Einstein · "), "a section redirect whose fragment matches nothing must not error: {text}");
+}
+
+#[test]
+fn links_section_redirect_with_an_unmatched_fragment_falls_back_to_the_whole_article() {
+    let (_d, library) = imported();
+    let text = tools::links_text(&library, "Stale reference", None).unwrap();
+    assert!(text.contains("linked from \"Albert Einstein\""), "{text}");
 }
 
 #[test]
@@ -125,10 +185,52 @@ fn read_out_of_range_section_names_the_actual_outline() {
 }
 
 #[test]
+fn read_section_offset_past_the_end_is_an_error_naming_the_actual_length() {
+    let (_d, library) = imported();
+    let err = tools::read_text(&library, "Albert Einstein", Some("Life"), Some(9999)).unwrap_err();
+    assert!(err.contains("past the end"), "{err}");
+    assert!(err.contains("Life"), "{err}");
+}
+
+#[test]
+fn resolve_section_numeric_fragment_matches_the_heading_not_the_outline_index() {
+    use ok_core::document::{Document, Section};
+    let doc = Document {
+        entry: 1,
+        path: "P".into(),
+        title: "T".into(),
+        sections: vec![
+            Section { level: 1, heading: "T".into(), anchor: None, blocks: vec![] },
+            Section { level: 2, heading: "Other".into(), anchor: None, blocks: vec![] },
+            Section { level: 2, heading: "1".into(), anchor: Some("1".into()), blocks: vec![] },
+        ],
+    };
+    // Explicit caller input: "1" means outline index 1 ("Other").
+    assert_eq!(tools::resolve_section(&doc, "1", true), Some(1));
+    // A fragment (as from a section redirect) is never reinterpreted as an
+    // index, even when it looks like one — it must match the heading/
+    // anchor literally named "1".
+    assert_eq!(tools::resolve_section(&doc, "1", false), Some(2));
+}
+
+#[test]
 fn read_unknown_article_is_an_error_with_suggestions() {
     let (_d, library) = imported();
     let err = tools::read_text(&library, "Not A Real Title At All", None, None).unwrap_err();
     assert!(err.contains("no article titled"), "{err}");
+}
+
+#[test]
+fn lookup_error_never_leaks_the_underlying_error_detail() {
+    let e = ok_core::Error::IndexMismatch {
+        index: std::path::PathBuf::from("/Users/alex/private/data.okx"),
+        expected: "abc123".into(),
+        found: "def456".into(),
+    };
+    let msg = tools::lookup_error("Some Article", e);
+    assert!(!msg.contains("/Users/alex/private"), "{msg}");
+    assert!(!msg.contains("abc123") && !msg.contains("def456"), "{msg}");
+    assert!(msg.contains("Some Article"), "{msg}");
 }
 
 #[test]
@@ -141,12 +243,14 @@ fn read_section_truncates_at_a_char_boundary_and_round_trips_with_offset() {
     let continued = tools::read_text(&library, "Albert Einstein", Some("Early life"), Some(offset)).unwrap();
     assert!(!continued.contains("truncated"), "one continuation is enough for this fixture: {continued}");
 
-    // Each call's shape is "{heading} ({total} chars)\n\n{body}[…marker]"; strip the
-    // header and marker, and the two bodies concatenated must exactly reproduce the
-    // whole, untruncated section text — proof the cut landed on a char boundary.
+    // Each call's shape is "{heading} ({total} chars)\n\n<article-text>\n{body}\n</article-text>[…marker]";
+    // strip the header and fence, and the two bodies concatenated must
+    // exactly reproduce the whole section's text minus its own heading
+    // line (the header above already names it — see read_section_does_not_print_the_heading_twice).
     fn body_of(text: &str) -> &str {
-        let (_, rest) = text.split_once("\n\n").unwrap();
-        rest.split("\n…[truncated").next().unwrap()
+        let start = text.find("<article-text>\n").unwrap() + "<article-text>\n".len();
+        let end = text.find("\n</article-text>").unwrap();
+        &text[start..end]
     }
     let mut joined = body_of(&full).to_string();
     joined.push_str(body_of(&continued));
@@ -156,9 +260,11 @@ fn read_section_truncates_at_a_char_boundary_and_round_trips_with_offset() {
         Resolution::NotFound { .. } => panic!("fixture article must resolve"),
     };
     let doc = library.article(target.entry).unwrap();
-    let index = tools::resolve_section(&doc, "Early life").unwrap();
+    let index = tools::resolve_section(&doc, "Early life", true).unwrap();
+    let heading = ok_core::text::sanitize(&doc.sections[index].heading);
     let whole = ok_core::text::sanitize(&doc.section_text(index));
-    assert_eq!(joined, whole);
+    let whole_body = whole.strip_prefix(&heading).and_then(|s| s.strip_prefix('\n')).unwrap_or(&whole);
+    assert_eq!(joined, whole_body);
 }
 
 #[test]
@@ -170,6 +276,15 @@ fn links_deduplicates_counts_unique_missing_and_external() {
     assert!(lines.contains(&"Theory of relativity"), "{text}");
     assert!(text.contains("1 not in this collection"), "{text}");
     assert!(text.contains("1 external"), "{text}");
+}
+
+#[test]
+fn links_with_a_section_names_the_section_not_the_article() {
+    let (_d, library) = imported();
+    let text = tools::links_text(&library, "Albert Einstein", Some("Life")).unwrap();
+    let header = text.lines().next().unwrap();
+    assert!(header.contains("linked from \"Life\""), "{header}");
+    assert!(!header.contains("Albert Einstein"), "the section's own name, not the article's: {header}");
 }
 
 #[test]
