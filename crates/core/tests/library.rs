@@ -159,6 +159,20 @@ fn resolve_title_is_exact_and_never_falls_back_silently() {
 }
 
 #[test]
+fn resolve_title_retries_a_shorter_prefix_for_a_typo_that_shares_none() {
+    let (_dir, lib) = imported();
+    // One letter too many: "Einsteinn" shares no prefix with any real
+    // title, but "Einstein" (one character shorter) does.
+    match lib.resolve_title("Einsteinn").unwrap() {
+        Resolution::NotFound { suggestions } => {
+            assert!(!suggestions.is_empty(), "a near-miss typo must still surface a suggestion via a shorter prefix retry");
+            assert!(suggestions.iter().any(|s| s.title == "Albert Einstein"), "{suggestions:?}");
+        }
+        other => panic!("expected NotFound with suggestions, got {other:?}"),
+    }
+}
+
+#[test]
 fn resolve_title_refuses_a_non_article_entry_that_exists_at_that_path() {
     let (_dir, lib) = imported();
     // The path exists in the ZIM (it's a real resource entry), but it isn't

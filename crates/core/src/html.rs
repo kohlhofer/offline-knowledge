@@ -251,28 +251,40 @@ fn render_table(out: &mut String, rows: &[Vec<Cell>], paths: &dyn Fn(u32) -> Opt
     out.push_str("</table>");
 }
 
+/// Groups consecutive runs that share the same link (by value — two runs
+/// pointing at the same article, with the same fragment) under one anchor,
+/// rather than one anchor per run: `*E* = *mc*²` linked to the same article
+/// is four `Inline`s (only "E" and "mc" are italic) but one logical link —
+/// four separate anchors means four Tab stops, four `n` presses and a
+/// repeated "↗ domain" marker for an external one.
 fn render_inlines(out: &mut String, content: &[Inline], paths: &dyn Fn(u32) -> Option<String>) {
-    for inline in content {
-        render_inline(out, inline, paths);
+    let mut i = 0;
+    while i < content.len() {
+        let link = &content[i].link;
+        let end = content[i + 1..].iter().take_while(|inline| &inline.link == link).count() + i + 1;
+        render_inline_group(out, &content[i..end], link.as_ref(), paths);
+        i = end;
     }
 }
 
-fn render_inline(out: &mut String, inline: &Inline, paths: &dyn Fn(u32) -> Option<String>) {
-    let link_close = inline.link.as_ref().map(|l| render_link_open(out, l, paths));
-    if inline.style.bold {
-        out.push_str("<strong>");
+fn render_inline_group(out: &mut String, group: &[Inline], link: Option<&Link>, paths: &dyn Fn(u32) -> Option<String>) {
+    let close = link.map(|l| render_link_open(out, l, paths));
+    for inline in group {
+        if inline.style.bold {
+            out.push_str("<strong>");
+        }
+        if inline.style.italic {
+            out.push_str("<em>");
+        }
+        render_text(out, &inline.text);
+        if inline.style.italic {
+            out.push_str("</em>");
+        }
+        if inline.style.bold {
+            out.push_str("</strong>");
+        }
     }
-    if inline.style.italic {
-        out.push_str("<em>");
-    }
-    render_text(out, &inline.text);
-    if inline.style.italic {
-        out.push_str("</em>");
-    }
-    if inline.style.bold {
-        out.push_str("</strong>");
-    }
-    if let Some(close) = link_close {
+    if let Some(close) = close {
         render_link_close(out, close);
     }
 }

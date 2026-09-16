@@ -143,6 +143,66 @@ fn non_web_uri_scheme_link_renders_inert_not_a_missing_article_link() {
     assert!(html.contains("Berlin"), "the text still shows, just not as a link: {html}");
 }
 
+/// `E = mc²` linked to the same article: three `Inline`s (only "E" and "mc"
+/// are italic), one logical link. Adjacent runs sharing a link merge into
+/// one anchor, not one per run.
+#[test]
+fn adjacent_runs_sharing_an_article_link_merge_into_one_anchor() {
+    let d = doc(vec![section(
+        1,
+        "Article",
+        vec![Block::Paragraph {
+            content: vec![
+                Inline { text: "E".into(), style: Style { bold: false, italic: true }, link: Some(Link::Article { entry: 2, fragment: None }) },
+                Inline { text: " = ".into(), style: Style::default(), link: Some(Link::Article { entry: 2, fragment: None }) },
+                Inline { text: "mc".into(), style: Style { bold: false, italic: true }, link: Some(Link::Article { entry: 2, fragment: None }) },
+            ],
+        }],
+    )]);
+    let html = d.to_html(&paths);
+    assert_eq!(html.matches("<a ").count(), 1, "one anchor for the whole run, not one per style change: {html}");
+    assert!(html.contains("<a class=\"link article\" href=\"/wiki/Other_Article\"><em>E</em> = <em>mc</em></a>"), "{html}");
+}
+
+/// Two adjacent runs pointing at the same external URL must not each carry
+/// their own "↗ domain" marker.
+#[test]
+fn adjacent_runs_sharing_an_external_link_get_one_domain_marker() {
+    let d = doc(vec![section(
+        1,
+        "Article",
+        vec![Block::Paragraph {
+            content: vec![
+                linked("Example", Link::External { url: "https://example.org/x".into() }),
+                Inline { text: " Site".into(), style: Style::default(), link: Some(Link::External { url: "https://example.org/x".into() }) },
+            ],
+        }],
+    )]);
+    let html = d.to_html(&paths);
+    assert_eq!(html.matches("<a ").count(), 1, "one anchor for the whole run: {html}");
+    assert_eq!(html.matches('↗').count(), 1, "one domain marker for the whole run, not one per source run: {html}");
+    assert!(html.contains("<a class=\"link external\" href=\"https://example.org/x\" rel=\"noreferrer\">Example Site</a>"), "{html}");
+}
+
+/// A different link (or no link) still starts a new anchor — merging must
+/// not bleed across an actual boundary.
+#[test]
+fn different_adjacent_links_do_not_merge() {
+    let d = doc(vec![section(
+        1,
+        "Article",
+        vec![Block::Paragraph {
+            content: vec![
+                linked("known", Link::Article { entry: 2, fragment: None }),
+                text(" and "),
+                linked("gone", Link::Missing { path: "Elsewhere".into() }),
+            ],
+        }],
+    )]);
+    let html = d.to_html(&paths);
+    assert_eq!(html.matches("<a").count(), 2, "two distinct links must not merge into one: {html}");
+}
+
 #[test]
 fn article_link_resolves_through_the_paths_closure_with_fragment() {
     let d = doc(vec![section(

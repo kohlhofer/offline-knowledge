@@ -131,7 +131,31 @@ impl Library {
             let fragment = self.stubs.get(hit.entry).and_then(|t| t.fragment);
             return Ok(Resolution::Found(Target { entry: hit.target, fragment }));
         }
-        Ok(Resolution::NotFound { suggestions: self.suggest(query, 5)? })
+        Ok(Resolution::NotFound { suggestions: self.suggest_with_fallback(query, 5)? })
+    }
+
+    /// [`Self::suggest`], retrying on progressively shorter prefixes of
+    /// `query` when the exact string has no prefix match at all. The title
+    /// index is prefix-only, so a typo with an extra or wrong trailing
+    /// character ("Einsteinn", "Albert_Einstien") shares no prefix with any
+    /// real title even though a shorter, still-distinctive one does. Stops
+    /// at the first prefix (from longest to shortest, down to 3 characters)
+    /// that returns anything, so the 404 page's suggestions aren't empty
+    /// for exactly the typos it exists to catch.
+    fn suggest_with_fallback(&self, query: &str, limit: usize) -> Result<Vec<Suggestion>> {
+        let hits = self.suggest(query, limit)?;
+        if !hits.is_empty() {
+            return Ok(hits);
+        }
+        let chars: Vec<char> = query.chars().collect();
+        for len in (3..chars.len()).rev() {
+            let prefix: String = chars[..len].iter().collect();
+            let hits = self.suggest(&prefix, limit)?;
+            if !hits.is_empty() {
+                return Ok(hits);
+            }
+        }
+        Ok(Vec::new())
     }
 
     /// Whether `entry` (already resolved through redirects) is a real,
