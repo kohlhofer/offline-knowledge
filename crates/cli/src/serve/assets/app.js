@@ -198,6 +198,12 @@ let currentHeadingId = null;
 // server's escaped attribute. Rows are built with createElement/setAttribute
 // rather than interpolated into an innerHTML string, so that character can
 // never break out of an attribute value.
+//
+// Replaces only the `<ul>`, never the `<input>`: rebuilding the input via
+// innerHTML on every keystroke (as this used to) destroys the very element
+// the user is typing into, dropping focus to <body> — the next keystroke
+// then reaches the document-level key map instead of the filter, which
+// swallows it, so a query past the first character was never possible.
 function renderOutline(sections, matches) {
   const list = document.createElement("ul");
   list.id = "outline-list";
@@ -221,10 +227,10 @@ function renderOutline(sections, matches) {
     li.appendChild(a);
     list.appendChild(li);
   });
-  outlineDialog.innerHTML = `<input type="text" id="outline-filter" placeholder="Filter sections" aria-label="Filter sections" autocomplete="off">`;
-  outlineDialog.appendChild(list);
+  const oldList = outlineDialog.querySelector("#outline-list");
+  if (oldList) oldList.replaceWith(list);
+  else outlineDialog.appendChild(list);
   const filterInput = outlineDialog.querySelector("#outline-filter");
-  filterInput.value = outlineQuery;
   if (matches.length > 0) filterInput.setAttribute("aria-activedescendant", "outline-first-match");
   else filterInput.removeAttribute("aria-activedescendant");
   outlineDialog.querySelector("[aria-current]")?.scrollIntoView({ block: "center" });
@@ -237,6 +243,8 @@ function openOutline() {
     return;
   }
   outlineQuery = "";
+  // Built once per open, not per keystroke — see renderOutline.
+  outlineDialog.innerHTML = `<input type="text" id="outline-filter" placeholder="Filter sections" aria-label="Filter sections" autocomplete="off">`;
   renderOutline(sections, filterOutline(sections, outlineQuery));
   outlineDialog.showModal();
   outlineDialog.querySelector("#outline-filter").focus();
@@ -267,6 +275,10 @@ outlineDialog.addEventListener("cancel", (e) => {
   if (outlineQuery) {
     e.preventDefault();
     outlineQuery = "";
+    // The input now survives a re-render (see renderOutline), so clearing
+    // its value needs saying explicitly — it's no longer rebuilt from
+    // outlineQuery as a side effect.
+    outlineDialog.querySelector("#outline-filter").value = "";
     const sections = articleSections();
     renderOutline(sections, filterOutline(sections, outlineQuery));
     outlineDialog.querySelector("#outline-filter").focus();
