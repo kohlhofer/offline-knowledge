@@ -215,7 +215,8 @@ function openOutline() {
 outlineDialog.addEventListener("input", (e) => {
   if (e.target.id !== "outline-filter") return;
   outlineQuery = e.target.value;
-  renderOutline(articleSections(), filterOutline(articleSections(), outlineQuery));
+  const sections = articleSections();
+  renderOutline(sections, filterOutline(sections, outlineQuery));
 });
 
 outlineDialog.addEventListener("keydown", (e) => {
@@ -236,7 +237,8 @@ outlineDialog.addEventListener("cancel", (e) => {
   if (outlineQuery) {
     e.preventDefault();
     outlineQuery = "";
-    renderOutline(articleSections(), filterOutline(articleSections(), outlineQuery));
+    const sections = articleSections();
+    renderOutline(sections, filterOutline(sections, outlineQuery));
     outlineDialog.querySelector("#outline-filter").focus();
   }
 });
@@ -274,10 +276,29 @@ function articleLinks() {
   return article ? Array.from(article.querySelectorAll("a")) : [];
 }
 
+// Each `n`/`N` press recomputed the whole link list and its top offset via
+// getBoundingClientRect on every one of them — over a thousand forced
+// layout reads on the largest article, on every keypress. Cached here,
+// invalidated only on resize (a link's on-page position is otherwise
+// stable between presses).
+let linkCache = null;
+
+function getLinkCache() {
+  if (!linkCache) {
+    const links = articleLinks();
+    const tops = links.map((l) => l.getBoundingClientRect().top + window.scrollY);
+    linkCache = { links, tops };
+  }
+  return linkCache;
+}
+
+window.addEventListener("resize", () => {
+  linkCache = null;
+});
+
 function focusAdjacentLink(forward) {
-  const links = articleLinks();
+  const { links, tops } = getLinkCache();
   if (links.length === 0) return;
-  const tops = links.map((l) => l.getBoundingClientRect().top + window.scrollY);
   const next = nextLinkIndex(tops, window.scrollY, window.innerHeight, selectedLinkIndex, forward);
   selectedLinkIndex = next;
   links[next].focus();
