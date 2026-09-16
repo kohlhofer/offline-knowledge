@@ -70,22 +70,24 @@ Web UI (`ok serve`), same shape with browser-native equivalents where they exist
 
 ## Speed
 
-`ok bench --samples 500 --http` on the M3 MacBook Air (16 GB, macOS 26.5), release build, warm page cache, 2026-09-15:
+`ok bench --samples 500 --http` on the M3 MacBook Air (16 GB, macOS 26.5), release build, warm page cache, 2026-09-15, after the round-2 speed pass (a fused sanitize+escape `to_html`, a rendered-article cache, `spawn_blocking` for `/api/suggest`):
 
 | Operation | p50 | p99 | max |
 | --- | --- | --- | --- |
-| Open library | 11.5 ms | | |
-| Title suggestions (1 to 6 characters) | 0.26 ms | 22 ms | 25 ms |
-| Load and parse an article | 6.0 ms | 20 ms | 22 ms |
-| Lay out at 100 columns | 0.56 ms | 1.9 ms | 2.4 ms |
-| Follow a link (load, parse, layout) | 8.9 ms | 28 ms | 44 ms |
-| Full-text search, a title word | 0.30 ms | 1.5 ms | 1.8 ms |
-| Full-text search, a common word | 0.88 ms | 2.3 ms | 2.3 ms |
-| `GET /wiki/{path}` over HTTP (resolve + load + parse + render) | 6.4 ms | 21 ms | 31 ms |
+| Open library | 9.7 ms | | |
+| Title suggestions (1 to 6 characters) | 0.20 ms | 12 ms | 16 ms |
+| Load and parse an article | 4.1 ms | 12 ms | 13 ms |
+| Lay out at 100 columns | 0.32 ms | 1.0 ms | 1.3 ms |
+| Follow a link (load, parse, layout) | 5.7 ms | 17 ms | 26 ms |
+| Full-text search, a title word | 0.21 ms | 1.4 ms | 3.1 ms |
+| Full-text search, a common word | 0.50 ms | 3.9 ms | 3.9 ms |
+| `GET /wiki/{path}` over HTTP, cache miss (resolve + load + parse + render) | 4.2 ms | 12 ms | 17 ms |
 
-The HTTP row is the whole route handler — `resolve_title`, article load/parse and `Document::to_html` — measured end to end through a real loopback socket, not just the in-process pieces above it. It costs about 0.4 ms over plain load-and-parse at p50 and stays inside the same p99 band, so `to_html` rendering itself is not a measurable cost even for the largest article in this collection (Demographics of the United States, 2.17 MB of source HTML, 312 KB of rendered HTML): a real request for it took 30–32 ms end to end against `ok serve`, the same as `ok show`'s load-and-parse timer alone, so its render cost is within run-to-run noise. `ok mcp`'s tools cost the same `Library` calls with no HTTP parsing at all — `read` on Albert Einstein (68 sections) returned 8,580 bytes in well under the load-and-parse budget above.
+`Document::to_html` is measurable — the first pass's claim that it wasn't held only because the per-run allocations it was doing were cheap relative to the html5ever parse ahead of it, not because there was nothing to measure. Before this pass's fix (fusing sanitize and HTML-escaping into one pass over the output buffer, and dropping the per-run temporary `String`s and per-heading/link `format!` calls — see `core/html.rs`): 3.08 ms on Demographics of the United States (2.17 MB of source HTML, the largest article in this collection) and 1.13 ms on Albert Einstein. After: 0.46 ms and 0.34 ms (medians over 30 runs), an 85% and 70% reduction, verified byte-identical against the pre-fix renderer over 498 real articles. A revisit to an already-rendered article now costs about 0.2 ms instead of a full parse and render, via the LRU cache added in the same pass; the `GET /wiki/{path}` row above is the cache-miss cost a first visit pays.
 
-The dependency cost of `axum` + `tokio` + `rmcp` (v1 used none of these; see `Cargo.toml`): the release binary grew from 10 MB to 14 MB, and a clean `cargo build --release -p ok` that has to compile them for the first time takes about 75 s wall clock (roughly 35 s of that is axum/tokio/hyper/tower; rmcp/schemars/uuid add the rest) versus a few seconds for `ok-core`/`ok` alone once every dependency is already built.
+`ok mcp`'s tools cost the same `Library` calls with no HTTP parsing at all. `read` on Albert Einstein (68 sections) now returns 6,176 bytes (about 1,530 tokens, chars÷4) — down from 8,580 bytes before this pass trimmed the default outline to top-level sections only (each noting how many subsections it hides). `search "general relativity"` returns 1,172 bytes for 8 hits; `read` on one section of Albert Einstein ("Life and career", the largest) returns 6,115 bytes; `links` on that same section returns 2,250 bytes for 136 unique articles.
+
+The dependency cost of `axum` + `tokio` + `rmcp` (v1 used none of these; see `Cargo.toml`): the release binary is 16 MB (10 MB before them; 14 MB before this pass's `hyper-util` and `tower`'s `limit` feature, added for the header-read timeout and concurrency cap). A clean `cargo build --release -p ok` that has to compile the dependency graph for the first time takes about 75 s wall clock (roughly 35 s of that is axum/tokio/hyper/tower; rmcp/schemars/uuid add the rest) versus 23 s for `ok-core`/`ok` alone once every third-party dependency is already built.
 
 Inside Apple's `container` (1.3.1, default 4 CPUs and 1 GB, ZIM on a virtiofs bind mount, host cache warm), an earlier run (before `serve`/`mcp` existed) stayed within a few milliseconds of native: suggestions p99 20 ms, article loads p99 21 ms, link follows p99 29 ms, searches p99 3.5 ms for a title word and 11 ms for a common one, and 29 ms to open the library. Not re-measured for the HTTP/MCP paths yet.
 
