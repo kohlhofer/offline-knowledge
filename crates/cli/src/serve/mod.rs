@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use axum::Router;
-use axum::extract::Request;
+use axum::extract::{FromRef, Request};
 use axum::http::header;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -25,6 +25,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
 use hyper_util::service::TowerToHyperService;
 use ok_core::Library;
+use routes::ArticleCache;
 use tower::limit::ConcurrencyLimitLayer;
 
 /// A client that never finishes sending its request headers (or sends them
@@ -68,7 +69,29 @@ async fn accept_loop(listener: tokio::net::TcpListener, library: Arc<Library>, h
     }
 }
 
+/// The router's state: `Library` and the article-render cache, extracted
+/// independently via `FromRef` so only `wiki_article` needs to name the
+/// cache at all — every other handler still just asks for `Arc<Library>`.
+#[derive(Clone)]
+struct AppState {
+    library: Arc<Library>,
+    cache: ArticleCache,
+}
+
+impl FromRef<AppState> for Arc<Library> {
+    fn from_ref(state: &AppState) -> Arc<Library> {
+        Arc::clone(&state.library)
+    }
+}
+
+impl FromRef<AppState> for ArticleCache {
+    fn from_ref(state: &AppState) -> ArticleCache {
+        state.cache.clone()
+    }
+}
+
 pub(crate) fn router(library: Arc<Library>) -> Router {
+    let state = AppState { library, cache: ArticleCache::new() };
     Router::new()
         .route("/", get(routes::home))
         .route("/search", get(routes::search))
@@ -77,7 +100,7 @@ pub(crate) fn router(library: Arc<Library>) -> Router {
         .route("/random", get(routes::random))
         .route("/static/app.css", get(routes::static_css))
         .route("/static/app.js", get(routes::static_js))
-        .with_state(library)
+        .with_state(state)
         .layer(ConcurrencyLimitLayer::new(MAX_CONCURRENT_REQUESTS))
         .layer(middleware::from_fn(security_headers))
 }

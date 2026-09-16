@@ -329,3 +329,40 @@ async fn concurrency_limit_layer_bounds_in_flight_requests() {
     }
     assert!(max_seen.load(Ordering::SeqCst) <= 2, "concurrency cap not enforced: saw {} requests in flight", max_seen.load(Ordering::SeqCst));
 }
+
+#[test]
+fn article_cache_hit_returns_what_was_inserted() {
+    use super::routes::{ArticleCache, CachedArticle};
+
+    let cache = ArticleCache::new();
+    assert!(cache.get(1).is_none(), "empty cache misses");
+    cache.insert(1, CachedArticle { title: "A".into(), html: "<p>a</p>".into() });
+    let hit = cache.get(1).expect("just inserted");
+    assert_eq!(hit.title, "A");
+    assert_eq!(hit.html, "<p>a</p>");
+}
+
+#[test]
+fn article_cache_evicts_the_least_recently_used_entry_past_the_cap() {
+    use super::routes::{ArticleCache, CachedArticle, MAX_CACHE_ENTRIES};
+
+    let cache = ArticleCache::new();
+    for i in 0..MAX_CACHE_ENTRIES as u32 {
+        cache.insert(i, CachedArticle { title: i.to_string(), html: "x".into() });
+    }
+    // One more push past the cap evicts entry 0, the least recently used:
+    // nothing has been looked up since the fill loop, so eviction order is
+    // exactly insertion order.
+    cache.insert(MAX_CACHE_ENTRIES as u32, CachedArticle { title: "new".into(), html: "y".into() });
+    assert!(cache.get(0).is_none(), "the least recently used entry is evicted past the cap");
+    assert!(cache.get(1).is_some(), "everything else survives");
+    assert!(cache.get(MAX_CACHE_ENTRIES as u32).is_some(), "the newest entry is present");
+}
+
+#[tokio::test]
+async fn wiki_article_second_request_serves_the_same_content_from_the_cache() {
+    let (_d, app) = app();
+    let first = body_text(get(&app, "/wiki/Albert_Einstein").await).await;
+    let second = body_text(get(&app, "/wiki/Albert_Einstein").await).await;
+    assert_eq!(first, second, "a cache hit renders the same page as the first request");
+}

@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{StatusCode, header};
@@ -9,6 +10,64 @@ use serde::Deserialize;
 use super::page::{self, SearchRow, SuggestDto, SuggestionRow};
 
 const MAX_QUERY_CHARS: usize = 200;
+
+/// A revisit to an already-rendered article costs a full parse and render
+/// again (53-61 ms for the largest article in the reference collection) —
+/// this cache makes it ~0.2 ms. Never invalidated: the ZIM backing `Library`
+/// is immutable while `ok serve` has it open, so a cached render can never
+/// go stale.
+pub(super) const MAX_CACHE_ENTRIES: usize = 32;
+const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+pub(super) struct CachedArticle {
+    pub(super) title: String,
+    pub(super) html: String,
+}
+
+impl CachedArticle {
+    fn bytes(&self) -> usize {
+        self.title.len() + self.html.len()
+    }
+}
+
+struct LruInner {
+    /// Most recently used at the front.
+    entries: VecDeque<(u32, Arc<CachedArticle>)>,
+    total_bytes: usize,
+}
+
+/// A small LRU of rendered article HTML, keyed by (already redirect-
+/// resolved) entry index. Cheap to clone — every clone shares the same
+/// lock, so it can be handed to each request via axum's `State` extractor.
+#[derive(Clone)]
+pub(super) struct ArticleCache(Arc<Mutex<LruInner>>);
+
+impl ArticleCache {
+    pub(super) fn new() -> Self {
+        ArticleCache(Arc::new(Mutex::new(LruInner { entries: VecDeque::new(), total_bytes: 0 })))
+    }
+
+    pub(super) fn get(&self, entry: u32) -> Option<Arc<CachedArticle>> {
+        let mut inner = self.0.lock().expect("cache lock");
+        let pos = inner.entries.iter().position(|(e, _)| *e == entry)?;
+        let hit = inner.entries.remove(pos).expect("just found");
+        let article = Arc::clone(&hit.1);
+        inner.entries.push_front(hit);
+        Some(article)
+    }
+
+    pub(super) fn insert(&self, entry: u32, article: CachedArticle) -> Arc<CachedArticle> {
+        let article = Arc::new(article);
+        let mut inner = self.0.lock().expect("cache lock");
+        inner.total_bytes += article.bytes();
+        inner.entries.push_front((entry, Arc::clone(&article)));
+        while inner.entries.len() > MAX_CACHE_ENTRIES || inner.total_bytes > MAX_CACHE_BYTES {
+            let Some((_, evicted)) = inner.entries.pop_back() else { break };
+            inner.total_bytes -= evicted.bytes();
+        }
+        article
+    }
+}
 
 fn html_ok(cache: &'static str, body: String) -> Response {
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, cache)], Html(body)).into_response()
@@ -111,21 +170,28 @@ enum ArticleOutcome {
 }
 
 /// Resolution, article load/parse and HTML rendering, all in one blocking
-/// call — the whole reason `/wiki/{path}` is the heavy route.
+/// call — the whole reason `/wiki/{path}` is the heavy route. A cache hit
+/// on the resolved entry skips load/parse/render entirely.
 ///
 /// `resolve_title` already refuses non-article targets, but `article` is
 /// re-checked defensively: `Error::NotArticle` still means "not found", not
 /// a server error.
-fn render_article(library: &Library, path: &str) -> ok_core::Result<ArticleOutcome> {
+fn render_article(library: &Library, cache: &ArticleCache, path: &str) -> ok_core::Result<ArticleOutcome> {
     let suggestions = match library.resolve_title(path)? {
-        Resolution::Found(target) => match library.article(target.entry) {
-            Ok(doc) => {
-                let html = doc.to_html(&|entry| library.path(entry).ok());
-                return Ok(ArticleOutcome::Found { title: doc.title, html });
+        Resolution::Found(target) => {
+            if let Some(cached) = cache.get(target.entry) {
+                return Ok(ArticleOutcome::Found { title: cached.title.clone(), html: cached.html.clone() });
             }
-            Err(ok_core::Error::NotArticle(_)) => library.suggest(path, 5)?,
-            Err(e) => return Err(e),
-        },
+            match library.article(target.entry) {
+                Ok(doc) => {
+                    let html = doc.to_html(&|entry| library.path(entry).ok());
+                    let cached = cache.insert(target.entry, CachedArticle { title: doc.title, html });
+                    return Ok(ArticleOutcome::Found { title: cached.title.clone(), html: cached.html.clone() });
+                }
+                Err(ok_core::Error::NotArticle(_)) => library.suggest(path, 5)?,
+                Err(e) => return Err(e),
+            }
+        }
         Resolution::NotFound { suggestions } => suggestions,
     };
     let rows = suggestions.into_iter().filter_map(|s| Some(SuggestionRow { path: library.path(s.article).ok()?, title: s.title })).collect();
@@ -133,10 +199,10 @@ fn render_article(library: &Library, path: &str) -> ok_core::Result<ArticleOutco
 }
 
 /// The only article route: canonical, shareable `/wiki/{path}` URLs.
-pub async fn wiki_article(State(library): State<Arc<Library>>, AxumPath(path): AxumPath<String>) -> Response {
+pub async fn wiki_article(State(library): State<Arc<Library>>, State(cache): State<ArticleCache>, AxumPath(path): AxumPath<String>) -> Response {
     let lib = Arc::clone(&library);
     let requested = path.clone();
-    let outcome = match tokio::task::spawn_blocking(move || render_article(&lib, &requested)).await {
+    let outcome = match tokio::task::spawn_blocking(move || render_article(&lib, &cache, &requested)).await {
         Ok(Ok(outcome)) => outcome,
         Ok(Err(e)) => return server_error_html(&e),
         Err(e) => return server_error_html(e),
