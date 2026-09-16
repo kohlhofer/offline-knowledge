@@ -44,10 +44,12 @@ pub struct SearchParams {
 pub struct ReadParams {
     /// An article's exact title or path, e.g. "Albert Einstein".
     article: String,
-    /// A section by outline index ("3") or exact heading text ("Early life"). Omit for the lead and outline.
+    /// A section by outline index ("3") or exact heading text ("Early life"); "outline" for the full outline
+    /// (the default without `section` lists top-level sections only). Omit for the lead and outline.
     #[serde(default)]
     section: Option<String>,
-    /// Character offset to continue a truncated section from. Ignored without `section`.
+    /// Character offset to continue a truncated section from. Only meaningful when a section is being read —
+    /// explicitly via `section`, or implicitly because `article` is a section-redirect title.
     #[serde(default)]
     offset: Option<usize>,
 }
