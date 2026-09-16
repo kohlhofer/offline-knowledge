@@ -282,6 +282,19 @@ fn read_unknown_article_is_an_error_with_suggestions() {
     assert!(err.contains("no article titled"), "{err}");
 }
 
+/// The same uncapped-retry-loop cost `/wiki/{path}` had (L6) is reachable
+/// through `read` and `links` too, both via `resolve_article` — capped
+/// there rather than in each caller.
+#[test]
+fn read_and_links_reject_an_oversized_article_name_instead_of_a_slow_resolve() {
+    let (_d, library) = imported();
+    let long = "a".repeat(201);
+    let read_err = tools::read_text(&library, &long, None, None).unwrap_err();
+    assert!(read_err.contains("at most"), "{read_err}");
+    let links_err = tools::links_text(&library, &long, None).unwrap_err();
+    assert!(links_err.contains("at most"), "{links_err}");
+}
+
 #[test]
 fn lookup_error_never_leaks_the_underlying_error_detail() {
     let e = ok_core::Error::IndexMismatch {

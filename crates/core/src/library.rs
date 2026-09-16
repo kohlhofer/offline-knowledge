@@ -51,6 +51,10 @@ pub enum Resolution {
     NotFound { suggestions: Vec<Suggestion> },
 }
 
+/// How many progressively shorter prefixes [`Library::suggest_with_fallback`]
+/// will try, at most.
+const MAX_PREFIX_RETRIES: usize = 5;
+
 impl Library {
     pub fn open(zim_path: impl AsRef<Path>) -> Result<Library> {
         let zim_path = zim_path.as_ref().to_path_buf();
@@ -139,16 +143,21 @@ impl Library {
     /// index is prefix-only, so a typo with an extra or wrong trailing
     /// character ("Einsteinn", "Albert_Einstien") shares no prefix with any
     /// real title even though a shorter, still-distinctive one does. Stops
-    /// at the first prefix (from longest to shortest, down to 3 characters)
-    /// that returns anything, so the 404 page's suggestions aren't empty
-    /// for exactly the typos it exists to catch.
+    /// at the first prefix (from longest to shortest) that returns
+    /// anything, so the 404 page's suggestions aren't empty for exactly the
+    /// typos it exists to catch — bounded to [`MAX_PREFIX_RETRIES`] steps
+    /// (never below 3 characters), not one query per character down to 3:
+    /// a typo is a handful of characters off, not thousands, and an
+    /// unbounded retry here was one index query per character of `query`,
+    /// with no cap on `query`'s own length.
     fn suggest_with_fallback(&self, query: &str, limit: usize) -> Result<Vec<Suggestion>> {
         let hits = self.suggest(query, limit)?;
         if !hits.is_empty() {
             return Ok(hits);
         }
         let chars: Vec<char> = query.chars().collect();
-        for len in (3..chars.len()).rev() {
+        let shortest = chars.len().saturating_sub(MAX_PREFIX_RETRIES).max(3);
+        for len in (shortest..chars.len()).rev() {
             let prefix: String = chars[..len].iter().collect();
             let hits = self.suggest(&prefix, limit)?;
             if !hits.is_empty() {

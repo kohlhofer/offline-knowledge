@@ -173,6 +173,33 @@ fn resolve_title_retries_a_shorter_prefix_for_a_typo_that_shares_none() {
 }
 
 #[test]
+fn resolve_title_shorter_prefix_retry_is_bounded_not_one_query_per_character() {
+    let (_dir, lib) = imported();
+    // "Einstein" plus one extra character: the valid shorter prefix is one
+    // character away, well within the retry bound.
+    match lib.resolve_title("Einsteinx").unwrap() {
+        Resolution::NotFound { suggestions } => {
+            assert!(suggestions.iter().any(|s| s.title == "Albert Einstein"), "a 1-character-off typo must still be found: {suggestions:?}");
+        }
+        other => panic!("expected NotFound with suggestions, got {other:?}"),
+    }
+    // "Einstein" plus six extra characters: the valid shorter prefix is
+    // six characters away, past the bound — an unbounded retry down to 3
+    // characters would still find it (the old behavior); the point of the
+    // bound is that this one doesn't, in exchange for never running one
+    // index query per character of an arbitrarily long input.
+    match lib.resolve_title("Einsteinxxxxxx").unwrap() {
+        Resolution::NotFound { suggestions } => {
+            assert!(
+                !suggestions.iter().any(|s| s.title == "Albert Einstein"),
+                "a typo past the retry bound must not be found by the shortening loop: {suggestions:?}"
+            );
+        }
+        other => panic!("expected NotFound, got {other:?}"),
+    }
+}
+
+#[test]
 fn resolve_title_refuses_a_non_article_entry_that_exists_at_that_path() {
     let (_dir, lib) = imported();
     // The path exists in the ZIM (it's a real resource entry), but it isn't

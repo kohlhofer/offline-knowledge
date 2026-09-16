@@ -182,7 +182,16 @@ pub fn links_text(library: &Library, article: &str, section: Option<&str>) -> Re
     Ok(out)
 }
 
+/// Matches the web UI's own cap on a `/wiki/{path}` segment: `resolve_title`
+/// bounds its own retry loop, but a query this long still costs one full
+/// prefix-index lookup before that loop is ever reached, and no legitimate
+/// title or path is anywhere near this long.
+const MAX_ARTICLE_CHARS: usize = 200;
+
 fn resolve_article(library: &Library, article: &str) -> Result<ok_core::Target, String> {
+    if article.chars().count() > MAX_ARTICLE_CHARS {
+        return Err(format!("article accepts at most {MAX_ARTICLE_CHARS} characters"));
+    }
     match library.resolve_title(article) {
         Ok(Resolution::Found(target)) => Ok(target),
         Ok(Resolution::NotFound { suggestions }) => Err(not_found_message(article, &suggestions)),

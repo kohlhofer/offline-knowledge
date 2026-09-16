@@ -230,6 +230,9 @@ fn render_article(library: &Library, cache: &ArticleCache, path: &str) -> ok_cor
 
 /// The only article route: canonical, shareable `/wiki/{path}` URLs.
 pub async fn wiki_article(State(library): State<Arc<Library>>, State(cache): State<ArticleCache>, AxumPath(path): AxumPath<String>) -> Response {
+    if query_too_long(&path) {
+        return bad_request_html(&format!("a path accepts at most {MAX_QUERY_CHARS} characters"));
+    }
     let lib = Arc::clone(&library);
     let requested = path.clone();
     let outcome = match tokio::task::spawn_blocking(move || render_article(&lib, &cache, &requested)).await {

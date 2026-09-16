@@ -146,6 +146,18 @@ async fn oversized_query_is_400_not_silently_truncated() {
     assert!(body.contains("\"error\""), "{body}");
 }
 
+/// A long `/wiki/{path}` used to reach `resolve_title` uncapped, running one
+/// title-index query per character of the shortening retry loop — a 60 KB
+/// path took over 20 seconds. Capped the same way `/search` and
+/// `/api/suggest` already were.
+#[tokio::test]
+async fn oversized_wiki_path_is_400_not_a_slow_resolve() {
+    let (_d, app) = app();
+    let long = "a".repeat(201);
+    let res = get(&app, &format!("/wiki/{long}")).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
 #[tokio::test]
 async fn api_suggest_returns_title_path_matched_fragment_and_inbound() {
     let (_d, app) = app();
