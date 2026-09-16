@@ -359,11 +359,15 @@ fn top_level_outline_lines(doc: &Document, totals: &[usize], ends: &[usize]) -> 
 
 /// Each section's char count including its nested subsections (a prefix
 /// sum, O(sections) not O(sections²), matching `section_text`'s own
-/// look-ahead rule), sanitized the same way the text it's counting is, so
-/// this number and what a caller actually receives always agree. Also
-/// returns, per section, one past the index of its last nested subsection
-/// (`sections.len()` for one with none), used to report how many
-/// subsections a top-level heading is hiding.
+/// look-ahead rule), sanitized the same way the text it's counting is —
+/// minus the section's own heading, which `read_section` strips before
+/// counting `total`, so this number and what a caller actually receives
+/// agree: an outline advertising N chars means offset up to N-1 is valid,
+/// not N minus however long that section's own heading happens to be. A
+/// nested subsection's heading stays counted, since only the outermost
+/// one is ever stripped. Also returns, per section, one past the index of
+/// its last nested subsection (`sections.len()` for one with none), used
+/// to report how many subsections a top-level heading is hiding.
 fn section_stats(doc: &Document) -> (Vec<usize>, Vec<usize>) {
     let n = doc.sections.len();
     let own: Vec<usize> = doc.sections.iter().map(|s| sanitize(&s.plain_text()).chars().count()).collect();
@@ -382,7 +386,7 @@ fn section_stats(doc: &Document) -> (Vec<usize>, Vec<usize>) {
         }
         open.push(i);
     }
-    let totals = (0..n).map(|i| prefix[end[i]] - prefix[i]).collect();
+    let totals = (0..n).map(|i| prefix[end[i]] - prefix[i] - (sanitize(&doc.sections[i].heading).chars().count() + 1)).collect();
     (totals, end)
 }
 

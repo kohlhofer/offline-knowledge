@@ -204,6 +204,25 @@ fn read_section_outline_keyword_returns_the_full_outline() {
     assert!(text.contains("2    Early life ("), "the full outline lists every section, nested ones included: {text}");
 }
 
+/// The outline advertised a section's heading-inclusive length while
+/// `read_section` strips the heading before counting `total`, so the
+/// outline's own number was always one heading too many — `offset` equal
+/// to it was rejected as past the end. The outline's total must be exactly
+/// the last valid offset plus one.
+#[test]
+fn outline_char_count_matches_what_read_section_actually_accepts() {
+    let (_d, library) = imported();
+    let outline = tools::read_text(&library, "Albert Einstein", Some("outline"), None).unwrap();
+    let line = outline.lines().find(|l| l.contains("Early life")).expect("the fixture's nested heading");
+    let total: usize = line.split('(').nth(1).and_then(|s| s.trim_end_matches(" chars)").parse().ok()).expect("a parseable char count");
+
+    let err = tools::read_text(&library, "Albert Einstein", Some("Early life"), Some(total)).unwrap_err();
+    assert!(err.contains(&format!("({total} chars)")), "read_section's own total must match the outline's: {err}");
+
+    let ok = tools::read_text(&library, "Albert Einstein", Some("Early life"), Some(total - 1));
+    assert!(ok.is_ok(), "one less than the outline's total must still be inside the section: {ok:?}");
+}
+
 /// A real heading named "Outline" must win over the `section="outline"`
 /// keyword, and `read` and `links` must agree on that — before, `read`
 /// always took the keyword's full-outline dump instead, disagreeing with
