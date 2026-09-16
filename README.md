@@ -1,6 +1,6 @@
 # offline-knowledge
 
-Wikipedia on your own disk, read in milliseconds. A keystroke brings up titles in 0.2 ms, a link opens a rendered article in about 5 ms, and the library itself opens in 10. I built one index and three ways into it: a terminal reader, a web UI, and an MCP server for agents. All three go through `ok-core`'s `Library`, so the numbers below apply whichever one you use.
+Wikipedia on your own disk, read in milliseconds. A keystroke brings up titles in 0.2 ms, a link opens a rendered article in about 5 ms, and the library itself opens in 10. One index, three ways into it: a terminal reader, a web UI, and an MCP server for agents. All three go through `ok-core`'s `Library`, so the numbers below apply whichever one you use.
 
 The collection is a file you downloaded. Nothing is fetched while you read, no service answers the query, and the file stays the same until you replace it.
 
@@ -21,21 +21,21 @@ The collection is a file you downloaded. Nothing is fetched while you read, no s
 
 The terminal reader pays nothing beyond that first row. Only `serve`, `mcp` and `bench --http` build a tokio runtime, so the reader and the one-shot commands (`ok suggest`, `ok search`, `ok show --json`) start, answer and exit.
 
-The web UI costs the reader's numbers plus HTTP. A first visit to an article is the `GET /wiki/{path}` row; a revisit costs about 0.2 ms, served from an LRU of rendered articles. I had written earlier that rendering was too cheap to measure, and that was wrong. Fusing sanitize and HTML-escaping into one pass over the output buffer, then dropping the per-run temporary `String`s and per-heading `format!` calls, took Demographics of the United States (2.17 MB of source HTML, the largest article here) from 3.08 ms to 0.46, and Albert Einstein from 1.13 ms to 0.34. The output is byte-identical over 498 real articles.
+The web UI costs the reader's numbers plus HTTP. A first visit to an article is the `GET /wiki/{path}` row; a revisit costs about 0.2 ms, served from an LRU of rendered articles. Rendering was called too cheap to measure in an earlier pass, and it isn't. Fusing sanitize and HTML-escaping into one pass over the output buffer, then dropping the per-run temporary `String`s and per-heading `format!` calls, took Demographics of the United States (2.17 MB of source HTML, the largest article here) from 3.08 ms to 0.46, and Albert Einstein from 1.13 ms to 0.34. The output is byte-identical over 498 real articles.
 
 For `ok mcp` the budget is tokens. `read` on Albert Einstein, 68 sections, returns 6,176 bytes, about 1,530 tokens, because the default outline lists top-level sections and says how many subsections each one hides. `search "general relativity"` returns 1,172 bytes for 8 hits. `read` on the article's largest section returns 6,115 bytes, and `links` on that section returns 2,250 bytes covering 136 unique articles. Every identifier is a title or a path, so an agent can feed a result straight back in.
 
-The import does the work once. I read each ZIM into an FST of titles ranked by inbound links and a Tantivy full-text index, about 90 seconds and 154 MB for these 2.1 GB. Every read after that is a memory-mapped lookup with nothing to warm up.
+The import does the work once. Each ZIM becomes an FST of titles ranked by inbound links plus a Tantivy full-text index, about 90 seconds and 154 MB for these 2.1 GB. Every read after that is a memory-mapped lookup with nothing to warm up.
 
 The slow end of suggestions is one- and two-letter prefixes, which scan tens of thousands of titles. Precomputing those is the obvious next step if it ever shows in use.
 
-Inside Apple's `container` (1.3.1, default 4 CPUs and 1 GB, ZIM on a virtiofs bind mount, host cache warm), an earlier run before `serve` and `mcp` existed stayed within a few milliseconds of native: suggestions p99 20 ms, article loads p99 21 ms, link follows p99 29 ms, searches p99 3.5 ms for a title word and 11 ms for a common one, 29 ms to open the library. I have not re-measured the HTTP and MCP paths there.
+Inside Apple's `container` (1.3.1, default 4 CPUs and 1 GB, ZIM on a virtiofs bind mount, host cache warm), an earlier run before `serve` and `mcp` existed stayed within a few milliseconds of native: suggestions p99 20 ms, article loads p99 21 ms, link follows p99 29 ms, searches p99 3.5 ms for a title word and 11 ms for a common one, 29 ms to open the library. The HTTP and MCP paths have not been re-measured there.
 
 The release binary is 16 MB with `axum`, `tokio` and `rmcp` in it, against 10 MB for the reader alone. A clean `cargo build --release -p ok` takes about 75 s from an empty dependency graph, 23 s once third-party crates are built.
 
 ## Independent Access
 
-The ZIM file is the only dependency. Give the binary a file and it reads; it listens on a port when you run `ok serve` and tell it where to bind. I run it in Apple's `container` on an `--internal` network, which has no route out, and the reader, `ok bench` and `ok serve` all work there.
+The ZIM file is the only dependency. Give the binary a file and it reads; it listens on a port when you run `ok serve` and tell it where to bind. In Apple's `container` on an `--internal` network, which has no route out, the reader, `ok bench` and `ok serve` all work.
 
 A machine with no egress still has the encyclopedia, and an agent can consult it without the question leaving the host. Kiwix publishes collections at every size, a few hundred megabytes of Simple English up to the full encyclopedia at around 100 GB, and the same binary reads any of them.
 
@@ -105,7 +105,7 @@ Web UI (`ok serve`), same shape with browser-native equivalents where they exist
 
 ## How It Works
 
-`crates/zim` reads ZIM files without libzim. It memory-maps the file, parses directory entries in place, hands out uncompressed blobs as slices of the mapping, and decompresses zstd or xz clusters exactly as far as their offset tables say. I check and cap every size the file declares, because a ZIM file is input from the internet. A sampled comparison over 7,086 entries matches libzim byte for byte.
+`crates/zim` reads ZIM files without libzim. It memory-maps the file, parses directory entries in place, hands out uncompressed blobs as slices of the mapping, and decompresses zstd or xz clusters exactly as far as their offset tables say. Every size the file declares is checked and capped, because a ZIM file is input from the internet. A sampled comparison over 7,086 entries matches libzim byte for byte.
 
 `crates/core` imports a file once. It finds the real articles, turns mwoffliner's meta-refresh pages (171,945 section redirects in this file) into a lookup table, parses every article, counts inbound links, and writes the title FST and the Tantivy index. Articles reach every interface as a structured document of sections, paragraphs, lists, facts and resolved links, never as HTML. The exception is `ok-core::html`, the one place that turns that document back into HTML for `ok serve`, escaping every text run and allowlisting external link schemes, since ZIM content is untrusted.
 
