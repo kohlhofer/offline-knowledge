@@ -358,6 +358,101 @@ async fn half_open_connection_is_closed_after_the_header_read_timeout() {
     server.abort();
 }
 
+/// Invoked only as a subprocess by
+/// `accept_loop_survives_descriptor_exhaustion`, which lowers *its own*
+/// child process's descriptor limit with `ulimit` before re-exec'ing this
+/// same test binary — the machine's real limit, and every other test's, is
+/// never touched.
+#[tokio::test]
+#[ignore = "run only as a subprocess with ulimit -n already lowered; see accept_loop_survives_descriptor_exhaustion"]
+async fn accept_loop_flood_worker() {
+    let (_d, library) = library();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    println!("PORT={}", listener.local_addr().unwrap().port());
+    std::io::Write::flush(&mut std::io::stdout()).unwrap();
+    let _ = super::accept_loop(listener, Arc::new(library), std::time::Duration::from_secs(5)).await;
+}
+
+/// The regression this guards: `listener.accept().await?` used to propagate
+/// any accept error straight out of the loop, so a descriptor-exhaustion
+/// flood killed the whole process (reproduced by hand with `ulimit -n 96`
+/// against a real 90-connection flood: "Too many open files (os error 24)",
+/// then the process gone). Exhausting descriptors for real needs its own
+/// process, done here by re-exec'ing this test binary as a child with a
+/// lowered `ulimit -n` of its own.
+#[test]
+fn accept_loop_survives_descriptor_exhaustion() {
+    let exe = std::env::current_exe().expect("current test binary path");
+    let mut child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(r#"ulimit -n 96 && exec "$0" serve::tests::accept_loop_flood_worker --exact --ignored --nocapture"#)
+        .arg(&exe)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn the flood worker");
+
+    let stdout = child.stdout.take().expect("piped stdout");
+    let mut reader = std::io::BufReader::new(stdout);
+    // The test harness itself writes a blank line and "running 1 test"
+    // ahead of the worker's own output (guaranteed by `--nocapture`, not
+    // suppressed), so skip lines until the worker's PORT= line shows up.
+    let port: u16 = loop {
+        let mut line = String::new();
+        let n = std::io::BufRead::read_line(&mut reader, &mut line).expect("read a line from the worker");
+        if n == 0 {
+            let mut stderr_buf = String::new();
+            if let Some(mut stderr) = child.stderr.take() {
+                let _ = std::io::Read::read_to_string(&mut stderr, &mut stderr_buf);
+            }
+            panic!("worker closed stdout before printing a PORT= line; stderr: {stderr_buf}");
+        }
+        if let Some(value) = line.trim().strip_prefix("PORT=") {
+            break value.parse().expect("a numeric port");
+        }
+    };
+
+    // Hold connections open (not close them) so the worker's own accept()
+    // calls, not just its connecting peers, are the ones that run into
+    // EMFILE/ENFILE past its 96-descriptor cap.
+    let mut held = Vec::new();
+    for _ in 0..90 {
+        match std::net::TcpStream::connect(("127.0.0.1", port)) {
+            Ok(s) => held.push(s),
+            Err(_) => break,
+        }
+    }
+    assert!(held.len() > 20, "expected a meaningful flood before something stopped us, got {}", held.len());
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(child.try_wait().expect("try_wait").is_none(), "an accept error must not exit the process");
+
+    // Recovery: release most of the flood and confirm the worker still serves.
+    held.truncate(5);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let mut probe = std::net::TcpStream::connect(("127.0.0.1", port)).expect("still accepting connections after the flood");
+    std::io::Write::write_all(&mut probe, b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+    let mut response = String::new();
+    std::io::Read::read_to_string(&mut probe, &mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"), "worker did not answer after recovering from the flood: {response}");
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn is_descriptor_exhaustion_matches_emfile_and_enfile_only() {
+    use super::is_descriptor_exhaustion;
+
+    let emfile = std::io::Error::from_raw_os_error(24);
+    let enfile = std::io::Error::from_raw_os_error(23);
+    let other = std::io::Error::from(std::io::ErrorKind::ConnectionAborted);
+
+    assert!(is_descriptor_exhaustion(&emfile), "EMFILE (24) must be recognized");
+    assert!(is_descriptor_exhaustion(&enfile), "ENFILE (23) must be recognized");
+    assert!(!is_descriptor_exhaustion(&other), "an unrelated accept error must not trigger the backoff");
+}
+
 /// `ConcurrencyLimitLayer`, applied in isolation to a synthetic slow service:
 /// the real routes all resolve in well under a millisecond, so there is no
 /// window in which an end-to-end request could observe queueing — this

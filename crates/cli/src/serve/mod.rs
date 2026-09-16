@@ -50,6 +50,13 @@ async fn serve(library: Library, bind: SocketAddr) -> Result<()> {
     accept_loop(listener, Arc::new(library), HEADER_READ_TIMEOUT).await
 }
 
+/// A descriptor-exhaustion flood must not take the process down: an accept
+/// error on one connection is that connection's problem, and EMFILE/ENFILE
+/// mean the fix is time, not a retry — a short sleep before the next
+/// `accept()` gives in-flight connections a chance to close and free a
+/// descriptor, echoing what `axum::serve`'s own accept loop already did.
+const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
+
 /// The accept loop `serve` runs, with the header-read timeout as a parameter
 /// so a test can use a short one instead of waiting out
 /// [`HEADER_READ_TIMEOUT`]. Bypasses `axum::serve` (which builds a
@@ -58,7 +65,15 @@ async fn serve(library: Library, bind: SocketAddr) -> Result<()> {
 async fn accept_loop(listener: tokio::net::TcpListener, library: Arc<Library>, header_read_timeout: Duration) -> Result<()> {
     let app = router(library);
     loop {
-        let (stream, _addr) = listener.accept().await?;
+        let (stream, _addr) = match listener.accept().await {
+            Ok(pair) => pair,
+            Err(err) => {
+                if is_descriptor_exhaustion(&err) {
+                    tokio::time::sleep(ACCEPT_ERROR_BACKOFF).await;
+                }
+                continue;
+            }
+        };
         let app = app.clone();
         tokio::spawn(async move {
             let io = TokioIo::new(stream);
@@ -67,6 +82,13 @@ async fn accept_loop(listener: tokio::net::TcpListener, library: Arc<Library>, h
             let _ = builder.serve_connection_with_upgrades(io, TowerToHyperService::new(app)).await;
         });
     }
+}
+
+/// `ErrorKind::TooManyOpenFiles` is nightly-only as of this toolchain; the
+/// raw errno is stable across `accept()`'s Unix targets (Linux and macOS
+/// both use EMFILE 24, ENFILE 23), so match on that instead.
+fn is_descriptor_exhaustion(err: &std::io::Error) -> bool {
+    matches!(err.raw_os_error(), Some(24) | Some(23))
 }
 
 /// The router's state: `Library` and the article-render cache, extracted
