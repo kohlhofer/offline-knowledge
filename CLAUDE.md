@@ -2,8 +2,8 @@
 
 An offline knowledge appliance: Wikipedia (and later other datasets) as Kiwix ZIM
 files, imported once into fast indexes, read through a terminal UI. Rust from the
-start. The plan lives in the engineering knowledge base:
-`~/knowledge/engineering_kb/Outputs/2026-09-14_offline-knowledge-appliance-plan.md`.
+start. The design notes and the running plan live outside this repository, in the
+author's engineering knowledge base.
 
 ## Layout
 

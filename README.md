@@ -107,3 +107,12 @@ The slow end of suggestions is one- and two-letter prefixes, which scan tens of 
 scripts/fetch-test-data.sh   # small real ZIM files from openZIM's test suite, not committed
 cargo test
 ```
+
+## License
+
+The code is MIT, in `LICENSE`. No Wikipedia content ships in this repository. You
+download a ZIM file from Kiwix yourself and the reader keeps it in `data/`, which
+is not committed. The text inside that file stays under its own license, [CC BY-SA
+4.0](https://creativecommons.org/licenses/by-sa/4.0/) for Wikipedia, and the reader
+does not yet print a per-article source and license line. That belongs in every
+frontend before anyone publishes a rendered article.
