@@ -25,10 +25,18 @@ fn library() -> (tempfile::TempDir, Library) {
                 "Albert Einstein",
                 r##"<table class="infobox"><tr><th>Born</th><td>1879</td></tr></table>
                 <p>A <a href="Physicist">physicist</a> who knew <a href="Nowhere">nobody here</a> and cited
-                <a href="https://example.org/x">a source</a>.</p>"##,
+                <a href="https://example.org/x">a source</a>.</p>
+                <div class="mw-heading mw-heading2"><h2 id="Life">Life</h2></div>
+                <p>Born in Ulm.</p>"##,
             ),
         )
         .article("Physicist", "Physicist", &page("Physicist", "<p>Studies physics, like Einstein.</p>"))
+        .article(
+            "Einstein_early_life",
+            "Einstein early life",
+            r#"<html><head><meta http-equiv="refresh" content="0;URL='./Albert_Einstein#Life'" /></head><body></body></html>"#,
+        )
+        .redirect("Einstein", "Einstein", "Albert_Einstein")
         .resource("_res_/style.css", "text/css", b"p{}")
         .metadata("Title", "Tiny wiki")
         .build();
@@ -92,8 +100,26 @@ async fn search_happy_path_links_to_wiki_path_and_shows_a_summary() {
 async fn search_with_no_hits_shows_the_zero_results_state() {
     let (_d, app) = app();
     let body = body_text(get(&app, "/search?q=zzzznotaword").await).await;
+    assert!(body.contains("<h1>0 results for"), "a heading names the query and the count: {body}");
     assert!(body.contains("No articles mention"), "{body}");
     assert!(body.contains("zzzznotaword"), "{body}");
+}
+
+#[tokio::test]
+async fn search_shows_an_h1_with_the_query_and_the_result_count() {
+    let (_d, app) = app();
+    let body = body_text(get(&app, "/search?q=physics").await).await;
+    assert!(body.contains("<h1>1 result for"), "{body}");
+}
+
+#[tokio::test]
+async fn search_with_an_empty_query_prompts_instead_of_blaming_the_collection() {
+    let (_d, app) = app();
+    for uri in ["/search", "/search?q="] {
+        let body = body_text(get(&app, uri).await).await;
+        assert!(!body.contains("No articles mention"), "{uri}: {body}");
+        assert!(body.contains("Type a query"), "{uri}: {body}");
+    }
 }
 
 #[tokio::test]
@@ -135,7 +161,24 @@ async fn wiki_article_renders_title_infobox_and_breadcrumb() {
     let body = body_text(res).await;
     assert!(body.contains("<h1 id=\"Albert_Einstein\" data-path=\"Albert Einstein\">Albert Einstein</h1>"), "{body}");
     assert!(body.contains("class=\"infobox\""), "{body}");
-    assert!(body.contains("<title>Albert Einstein</title>"), "{body}");
+    assert!(body.contains("<title>Albert Einstein — Tiny wiki</title>"), "the collection name is in the article title too: {body}");
+}
+
+#[tokio::test]
+async fn wiki_path_resolved_by_title_redirects_to_the_canonical_path() {
+    let (_d, app) = app();
+    let res = get(&app, "/wiki/Einstein").await;
+    assert_eq!(res.status(), StatusCode::FOUND);
+    assert_eq!(res.headers().get("location").unwrap(), "/wiki/Albert_Einstein");
+    assert_eq!(res.headers().get("cache-control").unwrap(), "no-store");
+}
+
+#[tokio::test]
+async fn wiki_section_redirect_redirects_to_the_canonical_path_with_its_fragment() {
+    let (_d, app) = app();
+    let res = get(&app, "/wiki/Einstein_early_life").await;
+    assert_eq!(res.status(), StatusCode::FOUND);
+    assert_eq!(res.headers().get("location").unwrap(), "/wiki/Albert_Einstein#Life");
 }
 
 #[tokio::test]
@@ -187,6 +230,17 @@ async fn internal_error_body_never_leaks_the_error_detail() {
     assert!(!body.contains("/Users/alex/private"), "{body}");
     assert!(!body.contains("abc123") && !body.contains("def456"), "{body}");
     assert!(body.contains("500 Internal Server Error"), "{body}");
+}
+
+#[tokio::test]
+async fn suggest_error_json_answers_in_the_json_shape_not_html() {
+    let res = super::routes::suggest_error_json("boom: /some/leaky/path");
+    assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(res.headers().get("content-type").unwrap(), "application/json");
+    let body = body_text(res).await;
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON, not an HTML body");
+    assert!(json.get("error").is_some(), "{body}");
+    assert!(!body.contains("/some/leaky/path"), "{body}");
 }
 
 #[tokio::test]

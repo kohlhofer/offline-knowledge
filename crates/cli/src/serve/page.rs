@@ -22,7 +22,7 @@ fn esc(s: &str) -> String {
 pub fn shell(page_title: &str, collection_title: &str, q: Option<&str>, body: &str) -> String {
     format!(
         r#"<!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="no-js">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -32,8 +32,8 @@ pub fn shell(page_title: &str, collection_title: &str, q: Option<&str>, body: &s
 <body>
 <header class="chrome">
 <form action="/search" method="get" class="searchbar" role="search">
-<input type="text" name="q" id="search-input" value="{q}" placeholder="Search {collection_title}" autocomplete="off"
- aria-autocomplete="list" aria-expanded="false" role="combobox" aria-controls="suggestions" aria-owns="suggestions">
+<input type="text" name="q" id="search-input" value="{q}" placeholder="Search {collection_title}" aria-label="Search {collection_title}" autocomplete="off"
+ aria-autocomplete="list" aria-expanded="false" role="combobox" aria-controls="suggestions">
 <button type="submit">Search all text</button>
 <ul id="suggestions" role="listbox" hidden></ul>
 </form>
@@ -41,9 +41,9 @@ pub fn shell(page_title: &str, collection_title: &str, q: Option<&str>, body: &s
 <div id="live" aria-live="polite" class="sr-only"></div>
 </header>
 <main id="main">{body}</main>
-<dialog id="outline"></dialog>
-<dialog id="help">
-<h2>Keys</h2>
+<dialog id="outline" aria-label="Outline"></dialog>
+<dialog id="help" aria-labelledby="help-heading">
+<h2 id="help-heading">Keys</h2>
 <dl>
 <dt>/</dt><dd>focus search</dd>
 <dt>type</dt><dd>live suggestions; Enter searches all text</dd>
@@ -68,7 +68,7 @@ pub fn home_body(library: &Library) -> String {
     format!(
         r#"<section class="home">
 <p class="count">{count} articles in <strong>{title}</strong>.</p>
-<p class="hint">Start typing above for titles, or press Enter to search the full text. Press <kbd>?</kbd> for keys, <kbd>r</kbd> for a random article.</p>
+<p class="hint">Start typing above for titles, or press Enter to search the full text. <span class="js-only">Press <kbd>?</kbd> for keys, <kbd>r</kbd> for a random article.</span></p>
 </section>"#,
         count = library.article_count(),
         title = esc(&library.meta().title),
@@ -81,9 +81,29 @@ pub struct SearchRow {
     pub summary: String,
 }
 
+/// The body for `/search` with an empty or missing `q`: says nothing was
+/// typed, rather than running the query and blaming the collection for not
+/// mentioning an empty string.
+pub fn search_prompt_body() -> String {
+    r#"<section class="search-page">
+<h1>Search</h1>
+<p class="hint">Type a query above, then press Enter to search the full text.</p>
+</section>"#
+        .to_string()
+}
+
 pub fn search_body(query: &str, rows: &[SearchRow]) -> String {
+    let count = rows.len();
+    let heading = format!(
+        r#"<h1>{count} result{plural} for "{q}"</h1>"#,
+        plural = if count == 1 { "" } else { "s" },
+        q = esc(query)
+    );
     if rows.is_empty() {
-        return format!(r#"<p class="empty">No articles mention "{q}".</p>"#, q = esc(query));
+        return format!(
+            r#"<section class="search-page">{heading}<p class="empty">No articles mention "{q}". Try different words, or fewer of them.</p></section>"#,
+            q = esc(query)
+        );
     }
     let items: String = rows
         .iter()
@@ -96,7 +116,7 @@ pub fn search_body(query: &str, rows: &[SearchRow]) -> String {
             )
         })
         .collect();
-    format!(r#"<ul class="results">{items}</ul>"#)
+    format!(r#"<section class="search-page">{heading}<ul class="results">{items}</ul></section>"#)
 }
 
 #[derive(Serialize)]

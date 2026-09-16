@@ -4,6 +4,10 @@
 // article links all work with this file entirely absent.
 "use strict";
 
+// The home hint promises "?" and "r", which do nothing without this file;
+// .js-only content stays hidden (see app.css) until this class flips.
+document.documentElement.classList.remove("no-js");
+
 const input = document.getElementById("search-input");
 const suggestions = document.getElementById("suggestions");
 const breadcrumb = document.getElementById("breadcrumb");

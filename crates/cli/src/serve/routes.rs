@@ -88,6 +88,17 @@ pub(super) fn server_error_html(e: impl std::fmt::Display) -> Response {
     (StatusCode::INTERNAL_SERVER_ERROR, [(header::CACHE_CONTROL, "no-store")], Html(body)).into_response()
 }
 
+/// `/api/suggest`'s own 500: the same "log the detail, say one fixed
+/// sentence" rule as `server_error_html`, but in the JSON shape this
+/// endpoint's happy path and 400 already use — an error response with an
+/// HTML body on a JSON endpoint is one more thing a fetch() caller has to
+/// guard against.
+pub(super) fn suggest_error_json(e: impl std::fmt::Display) -> Response {
+    eprintln!("500: {e}");
+    (StatusCode::INTERNAL_SERVER_ERROR, [(header::CACHE_CONTROL, "no-store")], axum::Json(serde_json::json!({"error": "something went wrong loading suggestions"})))
+        .into_response()
+}
+
 fn query_too_long(q: &str) -> bool {
     q.chars().count() > MAX_QUERY_CHARS
 }
@@ -113,6 +124,10 @@ pub async fn search(State(library): State<Arc<Library>>, Query(params): Query<Se
     let q = params.q.unwrap_or_default();
     if query_too_long(&q) {
         return bad_request_html(&format!("the search box accepts at most {MAX_QUERY_CHARS} characters"));
+    }
+    if q.trim().is_empty() {
+        let title = &library.meta().title;
+        return html_ok("no-cache", page::shell("Search", title, None, &page::search_prompt_body()));
     }
     let limit = params.limit.unwrap_or(30).clamp(1, 50);
     let lib = Arc::clone(&library);
@@ -164,14 +179,18 @@ pub async fn api_suggest(State(library): State<Arc<Library>>, Query(params): Que
     .await
     {
         Ok(Ok(dtos)) => dtos,
-        Ok(Err(e)) => return server_error_html(&e),
-        Err(e) => return server_error_html(e),
+        Ok(Err(e)) => return suggest_error_json(e),
+        Err(e) => return suggest_error_json(e),
     };
     (StatusCode::OK, [(header::CACHE_CONTROL, "no-store")], axum::Json(dtos)).into_response()
 }
 
 enum ArticleOutcome {
     Found { title: String, html: String },
+    /// The request resolved, but not to the canonical URL: a section
+    /// redirect's fragment, or a path that reached the article by title
+    /// rather than its own path. One canonical `/wiki/{path}` per article.
+    Redirect { location: String },
     NotFound { suggestions: Vec<SuggestionRow> },
 }
 
@@ -185,6 +204,11 @@ enum ArticleOutcome {
 fn render_article(library: &Library, cache: &ArticleCache, path: &str) -> ok_core::Result<ArticleOutcome> {
     let suggestions = match library.resolve_title(path)? {
         Resolution::Found(target) => {
+            let canonical = library.path(target.entry)?;
+            if canonical != path || target.fragment.is_some() {
+                let location = ok_core::html::wiki_href(&canonical, target.fragment.as_deref());
+                return Ok(ArticleOutcome::Redirect { location });
+            }
             if let Some(cached) = cache.get(target.entry) {
                 return Ok(ArticleOutcome::Found { title: cached.title.clone(), html: cached.html.clone() });
             }
@@ -214,7 +238,13 @@ pub async fn wiki_article(State(library): State<Arc<Library>>, State(cache): Sta
         Err(e) => return server_error_html(e),
     };
     match outcome {
-        ArticleOutcome::Found { title, html } => html_ok("no-cache", page::shell(&title, &library.meta().title, None, &page::article_body(&html))),
+        ArticleOutcome::Found { title, html } => {
+            let page_title = format!("{title} — {}", library.meta().title);
+            html_ok("no-cache", page::shell(&page_title, &library.meta().title, None, &page::article_body(&html)))
+        }
+        ArticleOutcome::Redirect { location } => {
+            (StatusCode::FOUND, [(header::LOCATION, location), (header::CACHE_CONTROL, "no-store".to_string())]).into_response()
+        }
         ArticleOutcome::NotFound { suggestions } => {
             let body = page::shell("Not found", &library.meta().title, None, &page::not_found_body(&path, &suggestions));
             (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-cache")], Html(body))

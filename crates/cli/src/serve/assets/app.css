@@ -46,6 +46,12 @@ body {
   background: var(--bg);
 }
 
+/* app.js removes .no-js from <html> on load; content that promises a
+   keyboard shortcut only works with it present. */
+.no-js .js-only {
+  display: none;
+}
+
 .sr-only {
   position: absolute;
   width: 1px;
