@@ -11,13 +11,19 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use ok_core::document::Link;
 use ok_core::{Library, SearchResult, Suggestion, Target};
 
-use layout::{Laid, layout};
+use layout::{Laid, Sidebar, layout_with};
 use outline::Outline;
 
 const SUGGESTIONS: usize = 12;
 const RESULTS: usize = 30;
 /// Longest line length for reading; wider terminals get margins.
 const MAX_TEXT_WIDTH: u16 = 100;
+/// The infobox column, as the web page has it, on terminals wide enough to
+/// hold it without squeezing the text.
+const SIDEBAR_WIDTH: u16 = 34;
+const SIDEBAR_GAP: u16 = 3;
+const SIDEBAR_MIN_TERMINAL: u16 = 118;
+const MIN_TEXT_WITH_SIDEBAR: u16 = 40;
 
 pub fn run(library: Library) -> Result<()> {
     let mut terminal = ratatui::init();
@@ -82,6 +88,8 @@ pub struct App {
     pub timing: Option<(&'static str, Duration)>,
     pub width: u16,
     pub height: u16,
+    /// Whether the reader wants the infobox column when the terminal is wide.
+    pub sidebar: bool,
     pub quit: bool,
     seed: u64,
 }
@@ -105,13 +113,28 @@ impl App {
             timing: None,
             width,
             height,
+            sidebar: true,
             quit: false,
             seed,
         }
     }
 
+    /// The infobox column, when the reader wants it and the terminal is wide enough.
+    pub fn sidebar(&self) -> Option<Sidebar> {
+        (self.sidebar && self.width >= SIDEBAR_MIN_TERMINAL).then_some(Sidebar { width: SIDEBAR_WIDTH })
+    }
+
     pub fn text_width(&self) -> u16 {
-        self.width.saturating_sub(4).clamp(20, MAX_TEXT_WIDTH)
+        let room = self.width.saturating_sub(4);
+        match self.sidebar() {
+            Some(side) => room.saturating_sub(side.width + SIDEBAR_GAP).clamp(MIN_TEXT_WITH_SIDEBAR, MAX_TEXT_WIDTH),
+            None => room.clamp(20, MAX_TEXT_WIDTH),
+        }
+    }
+
+    /// Where the infobox column starts, measured from the text column's left edge.
+    pub fn sidebar_offset(&self) -> u16 {
+        self.text_width() + SIDEBAR_GAP
     }
 
     /// Lines available for article text (everything but the status bar).
@@ -120,20 +143,22 @@ impl App {
     }
 
     pub fn resize(&mut self, width: u16, height: u16) {
-        let old = self.text_width();
+        let old = (self.text_width(), self.sidebar());
         self.width = width;
         self.height = height;
-        if old != self.text_width() {
-            if let Some(view) = &self.article {
-                // Re-wrap at the new width, keeping the reader in the same section
-                // and on whatever screen they were looking at.
-                let place = Place { entry: view.entry, scroll: 0, selected_link: None };
-                let section = view.laid.section_at(view.scroll).and_then(|s| s.anchor.clone());
-                let (screen, overlay, status, timing) = (self.screen, self.overlay.clone(), self.status.clone(), self.timing);
-                self.load(place, section);
-                (self.screen, self.overlay, self.status, self.timing) = (screen, overlay, status, timing);
-            }
+        if old != (self.text_width(), self.sidebar()) {
+            self.relayout();
         }
+    }
+
+    /// Re-wraps the open article in place, keeping the reader's section and screen.
+    fn relayout(&mut self) {
+        let Some(view) = &self.article else { return };
+        let place = Place { entry: view.entry, scroll: 0, selected_link: None };
+        let section = view.laid.section_at(view.scroll).and_then(|s| s.anchor.clone());
+        let (screen, overlay, status, timing) = (self.screen, self.overlay.clone(), self.status.clone(), self.timing);
+        self.load(place, section);
+        (self.screen, self.overlay, self.status, self.timing) = (screen, overlay, status, timing);
     }
 
     pub fn key(&mut self, key: KeyEvent) {
@@ -271,6 +296,15 @@ impl App {
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('f') => self.go_forward(),
             KeyCode::Char('o') => self.overlay = Overlay::Outline(Outline::open(&view.laid.sections, view.scroll)),
             KeyCode::Char('r') => self.random(),
+            KeyCode::Char('i') => {
+                self.sidebar = !self.sidebar;
+                self.relayout();
+                self.status = match (self.sidebar, self.width >= SIDEBAR_MIN_TERMINAL) {
+                    (true, true) => "facts column on".into(),
+                    (true, false) => format!("facts column needs a terminal {SIDEBAR_MIN_TERMINAL} columns wide"),
+                    (false, _) => "facts column off".into(),
+                };
+            }
             KeyCode::Char('?') => self.overlay = Overlay::Help,
             _ => {}
         }
@@ -371,7 +405,7 @@ impl App {
                 return;
             }
         };
-        let laid = layout(&doc, self.text_width());
+        let laid = layout_with(&doc, self.text_width(), self.sidebar());
         let mut scroll = place.scroll;
         if let Some(fragment) = &fragment {
             match laid.section_line(fragment) {

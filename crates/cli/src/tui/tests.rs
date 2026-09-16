@@ -30,6 +30,20 @@ fn app() -> (tempfile::TempDir, App) {
         .article("Physicist", "Physicist", &page("Physicist", r#"<p>Studies physics. See <a href="Albert_Einstein">Einstein</a>.</p>"#))
         .article("Theory_of_relativity", "Theory of relativity", &page("Theory of relativity", "<p>Space and time.</p>"))
         .article(
+            "Marie_Curie",
+            "Marie Curie",
+            &page(
+                "Marie Curie",
+                r#"<table class="infobox"><tbody>
+                <tr><th class="infobox-label">Born</th><td class="infobox-data">7 November 1867, Warsaw, Congress Poland</td></tr>
+                <tr><th class="infobox-label">Died</th><td class="infobox-data">4 July 1934, Passy, Haute-Savoie, France</td></tr>
+                <tr><th class="infobox-label">Known for</th><td class="infobox-data"><a href="Physicist">Radioactivity research</a></td></tr>
+                </tbody></table>
+                <p>A <a href="Physicist">physicist</a> and chemist who researched radioactivity.</p>
+                <div class="mw-heading mw-heading2"><h2 id="Prizes">Prizes</h2></div><p>Two Nobel Prizes.</p>"#,
+            ),
+        )
+        .article(
             "Einstein_legacy",
             "Einstein legacy",
             r#"<html><head><meta http-equiv="refresh" content="0;URL='./Albert_Einstein#Legacy'" /></head></html>"#,
@@ -227,6 +241,83 @@ fn full_text_search_from_the_search_screen() {
     assert_eq!(app.screen, Screen::Search);
     press(&mut app, KeyCode::Esc);
     assert_eq!(app.screen, Screen::Article);
+}
+
+#[test]
+fn wide_terminals_put_the_facts_in_a_column_beside_the_text() {
+    let (_d, mut app) = app();
+    app.resize(150, 40);
+    type_text(&mut app, "marie");
+    press(&mut app, KeyCode::Enter);
+
+    let view = app.article.as_ref().expect("article open");
+    assert!(app.sidebar().is_some(), "150 columns is wide enough");
+    assert!(!view.laid.sidebar.is_empty(), "the lead's facts moved into the column");
+    assert!(view.laid.sidebar.iter().all(|l| layout::display_width(&l.text()) <= 34));
+    assert!(
+        view.laid.lines.iter().all(|l| !l.text().starts_with("Born:")),
+        "facts are no longer in the text flow: {:?}",
+        view.laid.lines.iter().take(12).map(layout::Line::text).collect::<Vec<_>>()
+    );
+    let facts_text: String = view.laid.sidebar.iter().map(layout::Line::text).collect::<Vec<_>>().join("\n");
+    assert!(facts_text.contains("Born"), "{facts_text}");
+
+    // A link inside the column is still selectable, and its line number places
+    // it beside the lead so scrolling and visibility work unchanged.
+    let in_column = |l: &layout::LinkSpot| {
+        l.line >= view.laid.sidebar_start && l.line < view.laid.sidebar_start + view.laid.sidebar.len()
+    };
+    assert!(view.laid.links.iter().any(in_column), "the infobox's link is selectable: {:?}", view.laid.links);
+    press(&mut app, KeyCode::Tab);
+    let selected = app.article.as_ref().unwrap().selected_link.expect("Tab selected a link");
+    let spot = &app.article.as_ref().unwrap().laid.links[selected];
+    assert!(
+        spot.line < app.article.as_ref().unwrap().laid.sidebar_start + app.article.as_ref().unwrap().laid.sidebar.len(),
+        "the first Tab lands on the column's link, which sits beside the lead"
+    );
+}
+
+#[test]
+fn narrow_terminals_and_the_toggle_keep_the_facts_inline() {
+    let (_d, mut app) = app();
+    app.resize(90, 30);
+    type_text(&mut app, "marie");
+    press(&mut app, KeyCode::Enter);
+    assert!(app.sidebar().is_none(), "90 columns stays one column");
+    let view = app.article.as_ref().unwrap();
+    assert!(view.laid.sidebar.is_empty());
+    let text: Vec<String> = view.laid.lines.iter().map(layout::Line::text).collect();
+    let facts = text.iter().position(|l| l.starts_with("Born:")).expect("facts stay in the flow when narrow");
+    let lead = text.iter().position(|l| l.contains("physicist and chemist")).expect("the lead paragraph is there");
+    assert!(lead < facts, "the opening sentence comes before the infobox: {:?}", &text[..facts.max(lead) + 1]);
+
+    app.resize(150, 40);
+    assert!(!app.article.as_ref().unwrap().laid.sidebar.is_empty(), "widening moves them into the column");
+    press(&mut app, KeyCode::Char('i'));
+    assert!(app.sidebar().is_none(), "i turns the column off");
+    let view = app.article.as_ref().unwrap();
+    assert!(view.laid.sidebar.is_empty());
+    assert!(view.laid.lines.iter().any(|l| l.text().starts_with("Born:")));
+    assert!(app.status.contains("off"), "{}", app.status);
+    press(&mut app, KeyCode::Char('i'));
+    assert!(!app.article.as_ref().unwrap().laid.sidebar.is_empty(), "and back on");
+}
+
+#[test]
+fn the_facts_column_is_drawn_to_the_right_of_the_text() {
+    let (_d, mut app) = app();
+    app.resize(150, 40);
+    type_text(&mut app, "marie");
+    press(&mut app, KeyCode::Enter);
+    let mut terminal = Terminal::new(TestBackend::new(150, 40)).unwrap();
+    terminal.draw(|f| render::draw(f, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let row_text = |y: u16| -> String { (0..150).map(|x| buffer[(x, y)].symbol()).collect() };
+    let born = (0..40).find(|&y| row_text(y).contains("Born")).expect("the facts column is on screen");
+    let column = row_text(born).find("Born").unwrap();
+    let text_left = row_text(born).find(|c: char| !c.is_whitespace()).unwrap();
+    assert!(column > text_left + 40, "facts sit right of the text column: {column} vs {text_left}");
+    assert!(row_text(born).contains('│'), "a rule separates the two columns");
 }
 
 #[test]

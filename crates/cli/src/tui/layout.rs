@@ -12,6 +12,17 @@ pub struct Laid {
     /// One entry per link run, in reading order; spans refer to these by index.
     pub links: Vec<LinkSpot>,
     pub sections: Vec<SectionSpot>,
+    /// The lead section's facts, laid out for a side column. Empty unless the
+    /// layout was asked for one.
+    pub sidebar: Vec<Line>,
+    /// Which main-column line the side column starts beside, so both scroll together.
+    pub sidebar_start: usize,
+}
+
+/// A side column for the lead section's infobox, as the web page has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sidebar {
+    pub width: u16,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -77,9 +88,23 @@ impl Laid {
 const TEXT: Kind = Kind::Text(Style { bold: false, italic: false });
 
 pub fn layout(doc: &Document, width: u16) -> Laid {
+    layout_with(doc, width, None)
+}
+
+/// Lays the document out at `width`. With a `sidebar`, the lead section's
+/// facts go into a side column of that width instead of into the text flow;
+/// its links keep working because their line numbers are main-column
+/// positions beside which the column is drawn.
+pub fn layout_with(doc: &Document, width: u16, sidebar: Option<Sidebar>) -> Laid {
     let mut w = Writer {
         width: usize::from(width.max(20)),
-        laid: Laid { lines: Vec::new(), links: Vec::new(), sections: Vec::new() },
+        laid: Laid {
+            lines: Vec::new(),
+            links: Vec::new(),
+            sections: Vec::new(),
+            sidebar: Vec::new(),
+            sidebar_start: 0,
+        },
     };
     for (i, section) in doc.sections.iter().enumerate() {
         if i > 0 {
@@ -98,12 +123,36 @@ pub fn layout(doc: &Document, width: u16) -> Laid {
             let len = display_width(&section.heading).min(w.width);
             w.laid.lines.push(Line { spans: vec![Span { text: rule.repeat(len), kind: Kind::Marker }] });
         }
-        for block in &section.blocks {
-            w.blank();
-            w.block(block);
+        // The side column stands beside everything under the article title.
+        let lead = i == 0;
+        if lead && sidebar.is_some() {
+            w.laid.sidebar_start = w.laid.lines.len() + 1;
+        }
+        // In the lead, the first paragraph comes before the facts either way:
+        // into the side column when there is one, below the lead when there isn't.
+        let order: Vec<&Block> = if lead { lead_order(&section.blocks) } else { section.blocks.iter().collect() };
+        for block in order {
+            match (lead, sidebar, block) {
+                (true, Some(side), Block::Facts { .. }) => w.facts_column(block, side),
+                _ => {
+                    w.blank();
+                    w.block(block);
+                }
+            }
         }
     }
     w.laid
+}
+
+/// The lead's blocks with its first paragraph first, so an infobox never
+/// stands between the reader and the article's opening sentence.
+fn lead_order(blocks: &[Block]) -> Vec<&Block> {
+    match blocks.iter().position(|b| matches!(b, Block::Paragraph { .. })) {
+        Some(0) | None => blocks.iter().collect(),
+        Some(first) => std::iter::once(&blocks[first])
+            .chain(blocks.iter().enumerate().filter(|(i, _)| *i != first).map(|(_, b)| b))
+            .collect(),
+    }
 }
 
 struct Writer {
@@ -137,6 +186,34 @@ fn inline_pieces<'a>(content: &'a [Inline], base: Option<Kind>, out: &mut Vec<Pi
 }
 
 impl Writer {
+    /// Lays a facts block into the side column at its own width. Link spots get
+    /// main-column line numbers so selection and scrolling need no special case.
+    fn facts_column(&mut self, block: &Block, side: Sidebar) {
+        let mut column = Writer {
+            width: usize::from(side.width.max(12)),
+            laid: Laid { lines: Vec::new(), links: Vec::new(), sections: Vec::new(), sidebar: Vec::new(), sidebar_start: 0 },
+        };
+        column.block(block);
+
+        let link_base = self.laid.links.len();
+        let line_base = self.laid.sidebar.len();
+        for line in &mut column.laid.lines {
+            for span in &mut line.spans {
+                if let Kind::Link { index, .. } = &mut span.kind {
+                    *index += link_base;
+                }
+            }
+        }
+        for mut spot in column.laid.links {
+            spot.line = self.laid.sidebar_start + line_base + spot.line;
+            self.laid.links.push(spot);
+        }
+        if line_base > 0 {
+            self.laid.sidebar.push(Line::default());
+        }
+        self.laid.sidebar.append(&mut column.laid.lines);
+    }
+
     fn blank(&mut self) {
         if self.laid.lines.last().is_some_and(|l| !l.spans.is_empty()) {
             self.laid.lines.push(Line::default());

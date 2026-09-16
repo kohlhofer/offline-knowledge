@@ -73,7 +73,9 @@ fn search(frame: &mut Frame<'_>, app: &App, area: Rect) {
 fn article(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let Some(view) = &app.article else { return };
     let width = app.text_width();
-    let left = area.width.saturating_sub(width) / 2;
+    let side = app.sidebar().filter(|_| !view.laid.sidebar.is_empty());
+    let total = width + side.map_or(0, |s| s.width + (app.sidebar_offset() - width));
+    let left = area.width.saturating_sub(total) / 2;
     let text_area = Rect { x: area.x + left, y: area.y, width: width.min(area.width), height: area.height };
     let lines: Vec<Line<'_>> = view
         .laid
@@ -81,9 +83,46 @@ fn article(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .iter()
         .skip(view.scroll)
         .take(usize::from(area.height))
-        .map(|line| Line::from(line.spans.iter().map(|s| Span::styled(s.text.as_str(), style_for(s.kind, view.selected_link))).collect::<Vec<_>>()))
+        .map(|l| to_line(l, view.selected_link))
         .collect();
     frame.render_widget(Paragraph::new(lines), text_area);
+
+    // The facts column stands beside the lead and scrolls with it, like the
+    // web page's infobox: each of its lines belongs to a main-column line.
+    let Some(side) = side else { return };
+    let first = view.laid.sidebar_start;
+    let visible = view.scroll..view.scroll + usize::from(area.height);
+    if first >= visible.end || first + view.laid.sidebar.len() <= visible.start {
+        return;
+    }
+    let skip = visible.start.saturating_sub(first);
+    let top = first.saturating_sub(visible.start) as u16;
+    let column = Rect {
+        x: text_area.x + app.sidebar_offset(),
+        y: area.y + top,
+        width: side.width.min(area.width.saturating_sub(text_area.x - area.x + app.sidebar_offset())),
+        height: area.height - top,
+    };
+    if column.width < 8 {
+        return;
+    }
+    let rule = Rect { x: column.x.saturating_sub(2), y: column.y, width: 1, height: column.height };
+    let rows: Vec<Line<'_>> = view
+        .laid
+        .sidebar
+        .iter()
+        .skip(skip)
+        .take(usize::from(column.height))
+        .map(|l| to_line(l, view.selected_link))
+        .collect();
+    let rule_rows: Vec<Line<'_>> =
+        (0..rows.len()).map(|_| Line::from(Span::styled("│", style_for(Kind::Marker, None)))).collect();
+    frame.render_widget(Paragraph::new(rule_rows), rule);
+    frame.render_widget(Paragraph::new(rows), column);
+}
+
+fn to_line(line: &laid::Line, selected: Option<usize>) -> Line<'_> {
+    Line::from(line.spans.iter().map(|s| Span::styled(s.text.as_str(), style_for(s.kind, selected))).collect::<Vec<_>>())
 }
 
 fn style_for(kind: Kind, selected: Option<usize>) -> Style {
@@ -232,6 +271,7 @@ fn help(frame: &mut Frame<'_>, area: Rect) {
         ("Backspace  ←  →", "back, forward"),
         ("o", "outline: type to filter, Enter jumps"),
         ("/  s", "search"),
+        ("i", "facts column on or off (wide terminals)"),
         ("r  Ctrl-R", "random article"),
         ("q  Ctrl-C", "quit"),
     ];
