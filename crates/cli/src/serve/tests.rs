@@ -115,11 +115,14 @@ async fn search_with_no_hits_shows_the_zero_results_state() {
     assert!(body.contains("zzzznotaword"), "{body}");
 }
 
+/// "N results for X" read as a claim about a corpus total, when it was
+/// really just this page's row count (N14) — changes with &limit= alone.
 #[tokio::test]
-async fn search_shows_an_h1_with_the_query_and_the_result_count() {
+async fn search_shows_an_h1_naming_the_query_and_how_many_are_shown_not_a_claimed_total() {
     let (_d, app) = app();
     let body = body_text(get(&app, "/search?q=physics").await).await;
-    assert!(body.contains("<h1>1 result for"), "{body}");
+    assert!(body.contains("<h1>1 shown for"), "{body}");
+    assert!(!body.contains("1 result"), "{body}");
 }
 
 #[tokio::test]

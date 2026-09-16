@@ -107,13 +107,18 @@ pub fn search_prompt_body() -> String {
         .to_string()
 }
 
+/// `rows.len()` is this page's row count, not a corpus total — it changes
+/// with `&limit=` alone, so "N results for X" read as a claim the search
+/// wasn't making. Zero is the one count that's true regardless of limit
+/// (no result at 30 means none at any higher limit either); above zero,
+/// says what's actually true: this many are shown.
 pub fn search_body(query: &str, rows: &[SearchRow]) -> String {
     let count = rows.len();
-    let heading = format!(
-        r#"<h1>{count} result{plural} for "{q}"</h1>"#,
-        plural = if count == 1 { "" } else { "s" },
-        q = esc(query)
-    );
+    let heading = if count == 0 {
+        format!(r#"<h1>0 results for "{}"</h1>"#, esc(query))
+    } else {
+        format!(r#"<h1>{count} shown for "{}"</h1>"#, esc(query))
+    };
     if rows.is_empty() {
         return format!(
             r#"<section class="search-page">{heading}<p class="empty">No articles mention "{q}". Try different words, or fewer of them.</p></section>"#,
