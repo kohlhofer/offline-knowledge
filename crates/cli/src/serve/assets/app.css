@@ -2,20 +2,48 @@
 
 :root {
   color-scheme: light dark;
+  --bg: #fff;
+  --fg: #16181c;
   --accent: #2563eb;
   --border: #d8dbe0;
   --dim: #6b7280;
+  --surface: #f3f4f6;
+  --missing: #b45309;
+  --backdrop: rgb(0 0 0 / 35%);
+  --current: #eef2ff;
+  --shadow: rgb(0 0 0 / 12%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1c1e22;
+    --fg: #e5e7eb;
+    --accent: #60a5fa;
+    --border: #3a3d44;
+    --dim: #9099a6;
+    --surface: #26292f;
+    --missing: #f0b060;
+    --backdrop: rgb(0 0 0 / 55%);
+    --current: #263149;
+    --shadow: rgb(0 0 0 / 40%);
+  }
 }
 
 * {
   box-sizing: border-box;
 }
 
+html {
+  /* Clears the sticky header on an outline jump or a #fragment link. */
+  scroll-padding-top: 5rem;
+}
+
 body {
   margin: 0;
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   line-height: 1.5;
-  color: #16181c;
+  color: var(--fg);
+  background: var(--bg);
 }
 
 .sr-only {
@@ -33,7 +61,7 @@ header.chrome {
   position: sticky;
   top: 0;
   z-index: 10;
-  background: #fff;
+  background: var(--bg);
   border-bottom: 1px solid var(--border);
   padding: 0.6rem 1rem;
 }
@@ -59,7 +87,7 @@ header.chrome {
   padding: 0.45rem 0.8rem;
   border: 1px solid var(--border);
   border-radius: 0.4rem;
-  background: #f3f4f6;
+  background: var(--surface);
   cursor: pointer;
   white-space: nowrap;
 }
@@ -72,10 +100,10 @@ header.chrome {
   top: 100%;
   left: 0;
   right: 0;
-  background: #fff;
+  background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 0.4rem;
-  box-shadow: 0 6px 16px rgb(0 0 0 / 12%);
+  box-shadow: 0 6px 16px var(--shadow);
   max-height: 60vh;
   overflow-y: auto;
 }
@@ -87,7 +115,7 @@ header.chrome {
 
 #suggestions li[aria-selected="true"] {
   background: var(--accent);
-  color: #fff;
+  color: var(--bg);
 }
 
 .breadcrumb {
@@ -155,6 +183,23 @@ kbd {
 
 /* Article */
 
+article {
+  /* A 34-character token (a real DOI or a long compound word) must wrap
+     rather than push the page sideways, especially at a phone width. */
+  overflow-wrap: break-word;
+}
+
+article h1,
+article h2,
+article h3,
+article h4,
+article h5,
+article h6 {
+  /* Clears the sticky header on an outline jump or a #fragment link, same
+     as html's scroll-padding-top — belt and suspenders across browsers. */
+  scroll-margin-top: 5rem;
+}
+
 article h1 {
   font-size: 1.8rem;
   margin: 0 0 0.6rem;
@@ -179,7 +224,7 @@ article p {
 article a.link {
   color: var(--accent);
   text-decoration: none;
-  border-bottom: 1px solid rgb(37 99 235 / 35%);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
 article a.link:hover,
@@ -188,8 +233,10 @@ article a.link:focus-visible {
 }
 
 article a.link.missing {
-  color: #b45309;
-  border-bottom-color: rgb(180 83 9 / 35%);
+  /* A dotted underline, not just a different colour, is the "missing"
+     signal — colour alone doesn't reach colour-blind readers. */
+  color: var(--missing);
+  border-bottom: 1px dotted var(--missing);
 }
 
 article a.link.external {
@@ -225,7 +272,7 @@ article table.facts td {
 }
 
 article table.facts th[colspan="2"] {
-  background: #f3f4f6;
+  background: var(--surface);
   text-align: center;
 }
 
@@ -241,7 +288,7 @@ article table:not(.facts) td {
 }
 
 article pre {
-  background: #f3f4f6;
+  background: var(--surface);
   padding: 0.7rem;
   overflow-x: auto;
   border-radius: 0.3rem;
@@ -265,6 +312,8 @@ article pre {
 /* Dialogs: outline and help */
 
 dialog {
+  background: var(--bg);
+  color: var(--fg);
   border: 1px solid var(--border);
   border-radius: 0.5rem;
   padding: 1rem;
@@ -273,7 +322,7 @@ dialog {
 }
 
 dialog::backdrop {
-  background: rgb(0 0 0 / 35%);
+  background: var(--backdrop);
 }
 
 #outline-filter {
@@ -301,7 +350,7 @@ dialog::backdrop {
 }
 
 #outline-list li a[aria-current="true"] {
-  background: #eef2ff;
+  background: var(--current);
   font-weight: 600;
 }
 
