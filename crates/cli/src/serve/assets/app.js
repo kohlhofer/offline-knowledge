@@ -213,8 +213,10 @@ function renderOutline(sections, matches) {
       a.id = "outline-first-match";
       a.setAttribute("data-first-match", "");
     }
-    const indent = " ".repeat(Math.max(0, s.level - 2));
-    a.textContent = `${indent}${s.path}`;
+    // Indent via padding, not repeated spaces: a run of spaces collapses
+    // to one inside a block-level element, making nesting invisible.
+    a.style.paddingLeft = `${0.4 + Math.max(0, s.level - 2) * 0.9}rem`;
+    a.textContent = s.path;
     const li = document.createElement("li");
     li.appendChild(a);
     list.appendChild(li);

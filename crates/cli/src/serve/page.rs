@@ -32,6 +32,7 @@ pub fn shell(page_title: &str, collection_title: &str, q: Option<&str>, body: &s
 <body>
 <header class="chrome">
 <form action="/search" method="get" class="searchbar" role="search">
+<a class="home-link" href="/">{collection_title}</a>
 <input type="text" name="q" id="search-input" value="{q}" placeholder="Search {collection_title}" aria-label="Search {collection_title}" autocomplete="off"
  aria-autocomplete="list" aria-expanded="false" role="combobox" aria-controls="suggestions">
 <button type="submit">Search all text</button>
@@ -70,9 +71,23 @@ pub fn home_body(library: &Library) -> String {
 <p class="count">{count} articles in <strong>{title}</strong>.</p>
 <p class="hint">Start typing above for titles, or press Enter to search the full text. <span class="js-only">Press <kbd>?</kbd> for keys, <kbd>r</kbd> for a random article.</span></p>
 </section>"#,
-        count = library.article_count(),
+        count = with_thousands(library.article_count()),
         title = esc(&library.meta().title),
     )
+}
+
+/// `50001` -> `"50,001"`. `library.article_count()` is in the tens of
+/// thousands for a real collection; unbroken, it reads as noise.
+pub(super) fn with_thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 pub struct SearchRow {
@@ -153,8 +168,7 @@ pub fn not_found_body(requested_path: &str, suggestions: &[SuggestionRow]) -> St
     };
     format!(
         r#"<section class="not-found">
-<h1>Not in this collection</h1>
-<p>"{display}" is not in this collection.</p>
+<h1>"{display}" is not in this collection</h1>
 {suggestion_list}
 <form action="/search" method="get"><input type="hidden" name="q" value="{display}"><button type="submit">Search all text for "{display}"</button></form>
 </section>"#,

@@ -71,6 +71,16 @@ async fn home_shows_article_count_and_collection_title_with_hints() {
     assert!(body.contains("2 articles"), "{body}");
     assert!(body.contains("Tiny wiki"), "{body}");
     assert!(body.contains('?'), "a hint mentions the help key: {body}");
+    assert!(body.contains(r#"<a class="home-link" href="/">Tiny wiki</a>"#), "a persistent way home in the header: {body}");
+}
+
+#[test]
+fn with_thousands_separates_every_three_digits() {
+    assert_eq!(super::page::with_thousands(0), "0");
+    assert_eq!(super::page::with_thousands(999), "999");
+    assert_eq!(super::page::with_thousands(1000), "1,000");
+    assert_eq!(super::page::with_thousands(50001), "50,001");
+    assert_eq!(super::page::with_thousands(1_234_567), "1,234,567");
 }
 
 #[tokio::test]
@@ -202,6 +212,7 @@ async fn wiki_unknown_path_is_404_with_suggestions_and_a_search_all_text_link() 
     assert_eq!(res.headers().get("cache-control").unwrap(), "no-cache");
     let body = body_text(res).await;
     assert!(body.contains("not in this collection"), "{body}");
+    assert_eq!(body.matches("is not in this collection").count(), 1, "the miss is stated once, not in both the h1 and a paragraph: {body}");
     assert!(body.contains(r#"action="/search""#), "a working search-all-text fallback: {body}");
 }
 
