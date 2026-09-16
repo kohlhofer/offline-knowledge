@@ -9,7 +9,14 @@
 /// make `"ac.txt"` display as `"atxt.exe"` in a terminal, an HTML page or an
 /// agent's own text output.
 pub fn sanitize(text: &str) -> String {
-    text.chars().filter(|c| (!c.is_control() || *c == '\n') && !is_bidi_override(*c)).collect()
+    text.chars().filter(|&c| keep_char(c)).collect()
+}
+
+/// Whether `sanitize` keeps `c`. Exposed so `html::esc_into` can sanitize
+/// and escape in one pass over a string's characters, instead of building
+/// a sanitized `String` first and then a separately-escaped one from it.
+pub(crate) fn keep_char(c: char) -> bool {
+    (!c.is_control() || c == '\n') && !is_bidi_override(c)
 }
 
 fn is_bidi_override(c: char) -> bool {

@@ -210,6 +210,74 @@ fn heading_anchor_containing_a_quote_is_escaped_in_the_id_attribute() {
     assert!(!html.contains("id=\"Definition_of_\"racial_discrimination\"\""), "the raw quote must never appear unescaped inside the attribute: {html}");
 }
 
+/// A byte-exact pin over one fixture touching every block and link kind:
+/// the `esc_into`-based fused sanitize+escape rewrite (C1) must not change
+/// a single byte of output, only how it gets built.
+#[test]
+fn to_html_output_is_byte_identical_over_a_fixture_touching_every_kind() {
+    let d = doc(vec![
+        section(
+            1,
+            "Article",
+            vec![
+                Block::Paragraph {
+                    content: vec![
+                        Inline { text: "Bold and italic".into(), style: Style { bold: true, italic: true }, link: None },
+                        text(" plain "),
+                        linked("known", Link::Article { entry: 2, fragment: Some("Sec".into()) }),
+                        text(" "),
+                        linked("dangling", Link::Article { entry: 99, fragment: None }),
+                        text(" "),
+                        linked("gone", Link::Missing { path: "Gone_Page".into() }),
+                        text(" "),
+                        linked("here", Link::Anchor { fragment: "Sec".into() }),
+                        text(" "),
+                        linked("ext", Link::External { url: "https://example.org/x?a=1&b=2".into() }),
+                        text(" "),
+                        linked("bad", Link::External { url: "javascript:alert(1)".into() }),
+                    ],
+                },
+                Block::Quote { content: vec![text("a quote")] },
+                Block::Note { content: vec![text("see also")] },
+                Block::List {
+                    ordered: false,
+                    items: vec![
+                        ListItem { depth: 0, content: vec![text("one")] },
+                        ListItem { depth: 1, content: vec![text("one-a")] },
+                    ],
+                },
+                Block::Facts {
+                    facts: vec![
+                        Fact { label: "Heading".into(), value: vec![] },
+                        Fact { label: String::new(), value: vec![text("caption")] },
+                        Fact { label: "Born".into(), value: vec![text("1879")] },
+                    ],
+                },
+                Block::Table {
+                    rows: vec![vec![Cell { header: true, content: vec![text("H")] }, Cell { header: false, content: vec![text("D")] }]],
+                },
+                Block::Code { text: "fn f() {}".into() },
+            ],
+        ),
+        section(2, "Sub \"heading\"", vec![Block::Paragraph { content: vec![text("nested")] }]),
+    ]);
+    let html = d.to_html(&paths);
+    assert_eq!(
+        html,
+        "<h1 id=\"Article\" data-path=\"Article\">Article</h1><p><strong><em>Bold and italic</em></strong> plain \
+<a class=\"link article\" href=\"/wiki/Other_Article#Sec\">known</a> <span class=\"link missing\">dangling</span> \
+<a class=\"link missing\" href=\"/wiki/Gone_Page\">gone</a> <a href=\"#Sec\">here</a> \
+<a class=\"link external\" href=\"https://example.org/x?a=1&amp;b=2\" rel=\"noreferrer\">ext</a>\
+<span class=\"external\"> ↗ example.org</span> bad</p><aside class=\"infobox\"><table class=\"facts\">\
+<tr><th colspan=\"2\">Heading</th></tr><tr><td colspan=\"2\">caption</td></tr><tr><th>Born</th><td>1879</td></tr>\
+</table></aside><blockquote><p>a quote</p></blockquote><p class=\"hatnote\">see also</p>\
+<ul><li>one<ul><li>one-a</li></ul></li></ul><table><tr><th>H</th><td>D</td></tr></table>\
+<pre><code>fn f() {}</code></pre>\
+<h2 id=\"Sub_&quot;heading&quot;\" data-path=\"Sub &quot;heading&quot;\">Sub &quot;heading&quot;</h2><p>nested</p>",
+        "{html}"
+    );
+}
+
 #[test]
 fn heading_carries_an_id_and_a_data_path_breadcrumb() {
     // The lead section always has `anchor: None` from the parser, so its id

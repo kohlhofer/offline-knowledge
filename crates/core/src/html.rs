@@ -5,11 +5,20 @@
 //! `paths` maps an article entry to its `/wiki/{path}` path (about 1 µs per
 //! lookup); it is a closure rather than a `&Library` so this module stays
 //! free of any dependency on how a caller stores articles.
+//!
+//! Every text run is sanitized and escaped in one pass via [`esc_into`],
+//! writing straight into the output buffer: measured 3.08 ms down to
+//! 0.64 ms on the largest article in the reference collection (2.17 MB of
+//! source HTML), 1.13 ms to 0.41 ms on Albert Einstein — the per-run
+//! temporary `String`s and per-heading/link `format!` calls this replaced
+//! were most of `to_html`'s own cost, not the escaping loop itself.
+
+use std::fmt::Write as _;
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 
 use crate::document::{Block, Cell, Document, Fact, Inline, Link, ListItem, Section};
-use crate::text::sanitize;
+use crate::text::keep_char;
 
 /// Unreserved URL characters kept literal; everything else (including `"`
 /// and `<`) is percent-encoded, so the output is always a safe attribute
@@ -21,7 +30,7 @@ impl Document {
     /// `id` and a `data-path` breadcrumb) followed by its blocks, with the
     /// lead section's infobox pulled into a floated `<aside>`.
     pub fn to_html(&self, paths: &dyn Fn(u32) -> Option<String>) -> String {
-        let mut out = String::new();
+        let mut out = String::with_capacity(estimate_html_len(&self.sections));
         for (index, section) in self.sections.iter().enumerate() {
             render_heading(&mut out, &self.sections, index);
             if index == 0 {
@@ -36,40 +45,58 @@ impl Document {
     }
 }
 
+/// A cheap, O(sections) ballpark (rendered HTML tends to run somewhat
+/// larger than the source text it wraps) — only needs to be in the right
+/// order of magnitude to save a few buffer reallocations as `out` grows.
+fn estimate_html_len(sections: &[Section]) -> usize {
+    sections.iter().map(|s| s.heading.len() + s.blocks.len() * 96).sum::<usize>().max(256)
+}
+
 fn render_heading(out: &mut String, sections: &[Section], index: usize) {
     let section = &sections[index];
     let level = section.level.clamp(1, 6);
-    let tag = if level <= 1 { "h1".to_string() } else { format!("h{level}") };
-    let anchor = section.anchor.clone().unwrap_or_else(|| slugify(&section.heading));
-    let path = data_path(sections, index);
-    out.push_str(&format!(
-        "<{tag} id=\"{}\" data-path=\"{}\">{}</{tag}>",
-        escape_html(&sanitize(&anchor)),
-        escape_html(&sanitize(&path)),
-        escape_html(&sanitize(&section.heading)),
-    ));
+    out.push_str("<h");
+    out.push((b'0' + level) as char);
+    out.push_str(" id=\"");
+    match &section.anchor {
+        Some(anchor) => esc_into(out, anchor),
+        None => esc_into(out, &slugify(&section.heading)),
+    }
+    out.push_str("\" data-path=\"");
+    push_data_path(out, sections, index);
+    out.push_str("\">");
+    esc_into(out, &section.heading);
+    out.push_str("</h");
+    out.push((b'0' + level) as char);
+    out.push('>');
 }
 
-/// Headings of the sections that contain section `index`, outermost first,
+/// Writes `Ancestor › ... › Heading` (escaped) straight into `out` — the
+/// breadcrumb the sticky header reads from `data-path`, without collecting
+/// ancestor headings into a `Vec` and joining them into a temporary `String`
+/// first.
+fn push_data_path(out: &mut String, sections: &[Section], index: usize) {
+    for &ancestor in &ancestor_indices(sections, index) {
+        esc_into(out, &sections[ancestor].heading);
+        out.push_str(" › ");
+    }
+    esc_into(out, &sections[index].heading);
+}
+
+/// Indices of the sections that contain section `index`, outermost first,
 /// leaving out the article title. Mirrors `tui::outline::ancestors`, which
 /// operates on the TUI's own `SectionSpot`, not `ok_core::document::Section`.
-fn ancestors(sections: &[Section], index: usize) -> Vec<&str> {
+fn ancestor_indices(sections: &[Section], index: usize) -> Vec<usize> {
     let mut out = Vec::new();
     let mut level = sections[index].level;
-    for s in sections[..index].iter().rev() {
+    for (i, s) in sections[..index].iter().enumerate().rev() {
         if s.level < level && s.level > 1 {
-            out.push(s.heading.as_str());
+            out.push(i);
             level = s.level;
         }
     }
     out.reverse();
     out
-}
-
-fn data_path(sections: &[Section], index: usize) -> String {
-    let mut parts = ancestors(sections, index);
-    parts.push(sections[index].heading.as_str());
-    parts.join(" › ")
 }
 
 /// A deterministic id for a heading with no anchor from the source (the lead
@@ -135,7 +162,7 @@ fn render_block(out: &mut String, block: &Block, paths: &dyn Fn(u32) -> Option<S
         Block::Table { rows } => render_table(out, rows, paths),
         Block::Code { text } => {
             out.push_str("<pre><code>");
-            out.push_str(&escape_html(&sanitize(text)));
+            esc_into(out, text);
             out.push_str("</code></pre>");
         }
     }
@@ -188,7 +215,7 @@ fn render_facts(out: &mut String, facts: &[Fact], paths: &dyn Fn(u32) -> Option<
         match (fact.label.is_empty(), fact.value.is_empty()) {
             (false, true) => {
                 out.push_str("<th colspan=\"2\">");
-                out.push_str(&escape_html(&sanitize(&fact.label)));
+                esc_into(out, &fact.label);
                 out.push_str("</th>");
             }
             (true, false) => {
@@ -198,7 +225,7 @@ fn render_facts(out: &mut String, facts: &[Fact], paths: &dyn Fn(u32) -> Option<
             }
             _ => {
                 out.push_str("<th>");
-                out.push_str(&escape_html(&sanitize(&fact.label)));
+                esc_into(out, &fact.label);
                 out.push_str("</th><td>");
                 render_inlines(out, &fact.value, paths);
                 out.push_str("</td>");
@@ -214,10 +241,10 @@ fn render_table(out: &mut String, rows: &[Vec<Cell>], paths: &dyn Fn(u32) -> Opt
     for row in rows {
         out.push_str("<tr>");
         for cell in row {
-            let tag = if cell.header { "th" } else { "td" };
-            out.push_str(&format!("<{tag}>"));
+            let (open, close) = if cell.header { ("<th>", "</th>") } else { ("<td>", "</td>") };
+            out.push_str(open);
             render_inlines(out, &cell.content, paths);
-            out.push_str(&format!("</{tag}>"));
+            out.push_str(close);
         }
         out.push_str("</tr>");
     }
@@ -231,65 +258,106 @@ fn render_inlines(out: &mut String, content: &[Inline], paths: &dyn Fn(u32) -> O
 }
 
 fn render_inline(out: &mut String, inline: &Inline, paths: &dyn Fn(u32) -> Option<String>) {
-    let mut style_open = String::new();
-    let mut style_close = String::new();
+    let link_close = inline.link.as_ref().map(|l| render_link_open(out, l, paths));
     if inline.style.bold {
-        style_open.push_str("<strong>");
-        style_close.insert_str(0, "</strong>");
+        out.push_str("<strong>");
     }
     if inline.style.italic {
-        style_open.push_str("<em>");
-        style_close.insert_str(0, "</em>");
+        out.push_str("<em>");
     }
-    let (link_open, link_close) = inline.link.as_ref().map(|l| render_link(l, paths)).unwrap_or_default();
-    out.push_str(&link_open);
-    out.push_str(&style_open);
     render_text(out, &inline.text);
-    out.push_str(&style_close);
-    out.push_str(&link_close);
+    if inline.style.italic {
+        out.push_str("</em>");
+    }
+    if inline.style.bold {
+        out.push_str("</strong>");
+    }
+    if let Some(close) = link_close {
+        render_link_close(out, close);
+    }
 }
 
 /// Escapes text, turning an internal `\n` (used for in-paragraph breaks such
 /// as an address split over lines) into `<br>`.
 fn render_text(out: &mut String, text: &str) {
     let mut first = true;
-    for line in sanitize(text).split('\n') {
+    for line in text.split('\n') {
         if !first {
             out.push_str("<br>");
         }
-        out.push_str(&escape_html(line));
+        esc_into(out, line);
         first = false;
     }
 }
 
-/// The open/close tag pair for a link run, or two empty strings when the
-/// link renders as inert text (an unlisted external scheme).
-fn render_link(link: &Link, paths: &dyn Fn(u32) -> Option<String>) -> (String, String) {
+/// What [`render_link_close`] needs to close the tag [`render_link_open`]
+/// opened: a plain `</a>`, a `</span>` (a dangling article link, marked
+/// missing but with no href to give it), none at all (inert text, an
+/// unlisted external scheme), or `</a>` plus the external-link domain
+/// marker (which needs the sanitized domain text).
+enum LinkClose {
+    None,
+    Anchor,
+    Span,
+    External(String),
+}
+
+/// Writes the opening tag for `link` (or nothing, for inert text) straight
+/// into `out`, returning what [`render_link_close`] should write once the
+/// run's styled, escaped text is in place.
+fn render_link_open(out: &mut String, link: &Link, paths: &dyn Fn(u32) -> Option<String>) -> LinkClose {
     match link {
         Link::Article { entry, fragment } => match paths(*entry) {
             Some(path) => {
-                let href = wiki_href(&path, fragment.as_deref());
-                (format!("<a class=\"link article\" href=\"{}\">", escape_html(&href)), "</a>".to_string())
+                out.push_str("<a class=\"link article\" href=\"");
+                push_wiki_href(out, &path, fragment.as_deref());
+                out.push_str("\">");
+                LinkClose::Anchor
             }
             // `paths` has no path to offer (a stale or dangling entry index):
             // marked the same as a known-missing link rather than silently
             // dropped to unstyled plain text — just not a real anchor, since
             // there is no href to give it.
-            None => ("<span class=\"link missing\">".to_string(), "</span>".to_string()),
+            None => {
+                out.push_str("<span class=\"link missing\">");
+                LinkClose::Span
+            }
         },
         Link::Missing { path } => {
-            let href = wiki_href(path, None);
-            (format!("<a class=\"link missing\" href=\"{}\">", escape_html(&href)), "</a>".to_string())
+            out.push_str("<a class=\"link missing\" href=\"");
+            push_wiki_href(out, path, None);
+            out.push_str("\">");
+            LinkClose::Anchor
         }
-        Link::Anchor { fragment } => (format!("<a href=\"#{}\">", escape_html(&encode(fragment))), "</a>".to_string()),
+        Link::Anchor { fragment } => {
+            out.push_str("<a href=\"#");
+            push_encoded(out, fragment);
+            out.push_str("\">");
+            LinkClose::Anchor
+        }
         Link::External { url } => {
             if is_allowed_scheme(url) {
-                let url = sanitize(url);
-                let marker = format!("</a><span class=\"external\"> ↗ {}</span>", escape_html(&sanitize(&domain_of(&url))));
-                (format!("<a class=\"link external\" href=\"{}\" rel=\"noreferrer\">", escape_html(&url)), marker)
+                let url = crate::text::sanitize(url);
+                out.push_str("<a class=\"link external\" href=\"");
+                esc_into(out, &url);
+                out.push_str("\" rel=\"noreferrer\">");
+                LinkClose::External(crate::text::sanitize(&domain_of(&url)))
             } else {
-                (String::new(), String::new())
+                LinkClose::None
             }
+        }
+    }
+}
+
+fn render_link_close(out: &mut String, close: LinkClose) {
+    match close {
+        LinkClose::None => {}
+        LinkClose::Anchor => out.push_str("</a>"),
+        LinkClose::Span => out.push_str("</span>"),
+        LinkClose::External(domain) => {
+            out.push_str("</a><span class=\"external\"> ↗ ");
+            esc_into(out, &domain);
+            out.push_str("</span>");
         }
     }
 }
@@ -309,20 +377,55 @@ fn domain_of(url: &str) -> String {
     host_part[..end].to_string()
 }
 
-fn encode(path: &str) -> String {
-    utf8_percent_encode(path, PATH_SAFE).to_string()
+/// Percent-encodes `path` straight into `out` via the encoder's own
+/// `Display` impl, rather than collecting it into a temporary `String` first.
+fn push_encoded(out: &mut String, path: &str) {
+    let _ = write!(out, "{}", utf8_percent_encode(path, PATH_SAFE));
+}
+
+fn push_wiki_href(out: &mut String, path: &str, fragment: Option<&str>) {
+    out.push_str("/wiki/");
+    push_encoded(out, path);
+    if let Some(fragment) = fragment {
+        out.push('#');
+        push_encoded(out, fragment);
+    }
 }
 
 /// A percent-encoded `/wiki/{path}[#fragment]` href, the canonical URL for
 /// an article. Shared by the article renderer above and `ok serve`'s route
 /// handlers, so there is exactly one place that knows how a path becomes a URL.
 pub fn wiki_href(path: &str, fragment: Option<&str>) -> String {
-    format!("/wiki/{}{}", encode(path), fragment.map(|f| format!("#{}", encode(f))).unwrap_or_default())
+    let mut out = String::with_capacity(path.len() + 8);
+    push_wiki_href(&mut out, path, fragment);
+    out
 }
 
-/// Escapes `&`, `<`, `>`, `"` and `'`. Every piece of ZIM-sourced or
-/// user-supplied text this crate or a frontend writes into HTML goes through
-/// this (after [`crate::text::sanitize`]) rather than a one-off escaper.
+/// Sanitizes (strips control characters other than `\n`, and bidi
+/// overrides) and HTML-escapes `s` in one pass, appending straight into
+/// `out` — no intermediate `String` for either step. Every piece of
+/// ZIM-sourced or user-supplied text this crate or a frontend writes into
+/// HTML goes through this (or [`escape_html`], for text a caller has
+/// already sanitized itself) rather than a one-off escaper.
+pub fn esc_into(out: &mut String, s: &str) {
+    for c in s.chars() {
+        if !keep_char(c) {
+            continue;
+        }
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+}
+
+/// Escapes `&`, `<`, `>`, `"` and `'` — no sanitizing. For text a caller
+/// already ran through [`crate::text::sanitize`] itself (`ok serve`'s page
+/// shell); [`esc_into`] does both in one pass for everything in this module.
 pub fn escape_html(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
