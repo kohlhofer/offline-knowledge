@@ -150,17 +150,23 @@ pub async fn api_suggest(State(library): State<Arc<Library>>, Query(params): Que
             .into_response();
     }
     let limit = params.limit.unwrap_or(12).clamp(1, 50);
-    let hits = match library.suggest(&q, limit) {
-        Ok(hits) => hits,
-        Err(e) => return server_error_html(&e),
+    let lib = Arc::clone(&library);
+    let dtos = match tokio::task::spawn_blocking(move || -> ok_core::Result<Vec<SuggestDto>> {
+        Ok(lib
+            .suggest(&q, limit)?
+            .into_iter()
+            .filter_map(|s| {
+                let path = lib.path(s.article).ok()?;
+                Some(SuggestDto { title: s.title, path, matched: s.matched, fragment: s.fragment, inbound: s.inbound })
+            })
+            .collect())
+    })
+    .await
+    {
+        Ok(Ok(dtos)) => dtos,
+        Ok(Err(e)) => return server_error_html(&e),
+        Err(e) => return server_error_html(e),
     };
-    let dtos: Vec<SuggestDto> = hits
-        .into_iter()
-        .filter_map(|s| {
-            let path = library.path(s.article).ok()?;
-            Some(SuggestDto { title: s.title, path, matched: s.matched, fragment: s.fragment, inbound: s.inbound })
-        })
-        .collect();
     (StatusCode::OK, [(header::CACHE_CONTROL, "no-store")], axum::Json(dtos)).into_response()
 }
 
