@@ -347,8 +347,6 @@ if (article && "IntersectionObserver" in window) {
 // n/N: focus the next/previous link at or below the viewport top.
 // ---------------------------------------------------------------------
 
-let selectedLinkIndex = -1;
-
 function articleLinks() {
   return article ? Array.from(article.querySelectorAll("a")) : [];
 }
@@ -373,18 +371,24 @@ window.addEventListener("resize", () => {
   linkCache = null;
 });
 
+// The no-op guard used to compare against a `selectedLinkIndex` variable
+// that was only ever updated here, so once focus left a link some other
+// way (a click, Tab, the browser's own find-in-page), it stayed stale —
+// `n` then compared the freshly computed step against where the reader
+// used to be, not where they actually are, and could wrongly announce "no
+// more links". document.activeElement is always the true current position.
 function focusAdjacentLink(forward) {
   const { links, tops } = getLinkCache();
   if (links.length === 0) {
     announce("no links on this page");
     return;
   }
-  const next = nextLinkIndex(tops, window.scrollY, window.innerHeight, selectedLinkIndex, forward);
-  if (next === selectedLinkIndex) {
+  const current = links.indexOf(document.activeElement);
+  const next = nextLinkIndex(tops, window.scrollY, window.innerHeight, current, forward);
+  if (next === current) {
     announce(forward ? "no more links" : "no earlier links");
     return;
   }
-  selectedLinkIndex = next;
   links[next].focus();
   links[next].scrollIntoView({ block: "nearest" });
 }
@@ -413,14 +417,21 @@ document.addEventListener("keydown", (e) => {
       input.select();
       break;
     case "o":
+      // Scoped to the article page: elsewhere (e.g. /search's 30 result
+      // links, or the home page's own <h1>) there's no article outline to
+      // open, and announcing "no headings on this page" beside a page that
+      // plainly has one reads as broken rather than not applicable here.
+      if (!article) break;
       e.preventDefault();
       openOutline();
       break;
     case "n":
+      if (!article) break;
       e.preventDefault();
       focusAdjacentLink(true);
       break;
     case "N":
+      if (!article) break;
       e.preventDefault();
       focusAdjacentLink(false);
       break;
