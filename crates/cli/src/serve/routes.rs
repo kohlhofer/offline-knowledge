@@ -191,7 +191,7 @@ enum ArticleOutcome {
     /// redirect's fragment, or a path that reached the article by title
     /// rather than its own path. One canonical `/wiki/{path}` per article.
     Redirect { location: String },
-    NotFound { suggestions: Vec<SuggestionRow> },
+    NotFound { suggestions: Vec<SuggestionRow>, fallback_prefix: Option<String> },
 }
 
 /// Resolution, article load/parse and HTML rendering, all in one blocking
@@ -200,9 +200,11 @@ enum ArticleOutcome {
 ///
 /// `resolve_title` already refuses non-article targets, but `article` is
 /// re-checked defensively: `Error::NotArticle` still means "not found", not
-/// a server error.
+/// a server error — that second path used `suggest` (no shorter-prefix
+/// fallback, no relevance floor) where the first used
+/// `suggest_with_fallback`; both now go through the one function.
 fn render_article(library: &Library, cache: &ArticleCache, path: &str) -> ok_core::Result<ArticleOutcome> {
-    let suggestions = match library.resolve_title(path)? {
+    let (suggestions, fallback_prefix) = match library.resolve_title(path)? {
         Resolution::Found(target) => {
             let canonical = library.path(target.entry)?;
             if canonical != path || target.fragment.is_some() {
@@ -218,14 +220,14 @@ fn render_article(library: &Library, cache: &ArticleCache, path: &str) -> ok_cor
                     let cached = cache.insert(target.entry, CachedArticle { title: doc.title, html });
                     return Ok(ArticleOutcome::Found { title: cached.title.clone(), html: cached.html.clone() });
                 }
-                Err(ok_core::Error::NotArticle(_)) => library.suggest(path, 5)?,
+                Err(ok_core::Error::NotArticle(_)) => library.suggest_with_fallback(path, 5)?,
                 Err(e) => return Err(e),
             }
         }
-        Resolution::NotFound { suggestions } => suggestions,
+        Resolution::NotFound { suggestions, fallback_prefix } => (suggestions, fallback_prefix),
     };
     let rows = suggestions.into_iter().filter_map(|s| Some(SuggestionRow { path: library.path(s.article).ok()?, title: s.title })).collect();
-    Ok(ArticleOutcome::NotFound { suggestions: rows })
+    Ok(ArticleOutcome::NotFound { suggestions: rows, fallback_prefix })
 }
 
 /// The only article route: canonical, shareable `/wiki/{path}` URLs.
@@ -248,8 +250,8 @@ pub async fn wiki_article(State(library): State<Arc<Library>>, State(cache): Sta
         ArticleOutcome::Redirect { location } => {
             (StatusCode::FOUND, [(header::LOCATION, location), (header::CACHE_CONTROL, "no-store".to_string())]).into_response()
         }
-        ArticleOutcome::NotFound { suggestions } => {
-            let body = page::shell("Not found", &library.meta().title, None, &page::not_found_body(&path, &suggestions));
+        ArticleOutcome::NotFound { suggestions, fallback_prefix } => {
+            let body = page::shell("Not found", &library.meta().title, None, &page::not_found_body(&path, &suggestions, fallback_prefix.as_deref()));
             (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-cache")], Html(body))
                 .into_response()
         }

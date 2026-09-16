@@ -194,18 +194,24 @@ fn resolve_article(library: &Library, article: &str) -> Result<ok_core::Target, 
     }
     match library.resolve_title(article) {
         Ok(Resolution::Found(target)) => Ok(target),
-        Ok(Resolution::NotFound { suggestions }) => Err(not_found_message(article, &suggestions)),
+        Ok(Resolution::NotFound { suggestions, fallback_prefix }) => Err(not_found_message(article, &suggestions, fallback_prefix.as_deref())),
         Err(e) => Err(lookup_error(article, e)),
     }
 }
 
-fn not_found_message(article: &str, suggestions: &[Suggestion]) -> String {
+/// `fallback_prefix`, when present, names the shortened prefix `suggestions`
+/// actually matched — said explicitly, so a fallback batch doesn't read as
+/// if it answered `article` as typed.
+fn not_found_message(article: &str, suggestions: &[Suggestion], fallback_prefix: Option<&str>) -> String {
     let article = sanitize(article);
     if suggestions.is_empty() {
         return format!("no article titled \"{article}\" — call search");
     }
     let names: Vec<String> = suggestions.iter().take(MAX_SUGGESTIONS).map(|s| format!("\"{}\"", sanitize(&s.title))).collect();
-    format!("no article titled \"{article}\" — try: {}, or call search", names.join(", "))
+    match fallback_prefix {
+        Some(prefix) => format!("no article titled \"{article}\" — titles starting with \"{}\": {}, or call search", sanitize(prefix), names.join(", ")),
+        None => format!("no article titled \"{article}\" — try: {}, or call search", names.join(", ")),
+    }
 }
 
 /// Never shown to the caller: entry indices and filesystem paths stay in

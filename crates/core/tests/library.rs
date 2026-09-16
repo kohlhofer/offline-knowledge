@@ -148,12 +148,20 @@ fn resolve_title_is_exact_and_never_falls_back_silently() {
     );
 
     match lib.resolve_title("zzzzz not a title").unwrap() {
-        Resolution::NotFound { suggestions } => assert!(suggestions.is_empty(), "{suggestions:?}"),
+        Resolution::NotFound { suggestions, fallback_prefix } => {
+            assert!(suggestions.is_empty(), "{suggestions:?}");
+            assert_eq!(fallback_prefix, None);
+        }
         other => panic!("expected NotFound, got {other:?}"),
     }
     // A prefix match ("Einst...") is not an exact match: no silent fallback.
+    // It's also not a *shortened* prefix — the query itself already
+    // matched — so fallback_prefix names nothing here.
     match lib.resolve_title("Einst").unwrap() {
-        Resolution::NotFound { suggestions } => assert!(!suggestions.is_empty()),
+        Resolution::NotFound { suggestions, fallback_prefix } => {
+            assert!(!suggestions.is_empty());
+            assert_eq!(fallback_prefix, None);
+        }
         other => panic!("expected NotFound with suggestions, got {other:?}"),
     }
 }
@@ -164,9 +172,10 @@ fn resolve_title_retries_a_shorter_prefix_for_a_typo_that_shares_none() {
     // One letter too many: "Einsteinn" shares no prefix with any real
     // title, but "Einstein" (one character shorter) does.
     match lib.resolve_title("Einsteinn").unwrap() {
-        Resolution::NotFound { suggestions } => {
+        Resolution::NotFound { suggestions, fallback_prefix } => {
             assert!(!suggestions.is_empty(), "a near-miss typo must still surface a suggestion via a shorter prefix retry");
             assert!(suggestions.iter().any(|s| s.title == "Albert Einstein"), "{suggestions:?}");
+            assert_eq!(fallback_prefix.as_deref(), Some("Einstein"), "names the shortened prefix that actually matched");
         }
         other => panic!("expected NotFound with suggestions, got {other:?}"),
     }
@@ -178,8 +187,9 @@ fn resolve_title_shorter_prefix_retry_is_bounded_not_one_query_per_character() {
     // "Einstein" plus one extra character: the valid shorter prefix is one
     // character away, well within the retry bound.
     match lib.resolve_title("Einsteinx").unwrap() {
-        Resolution::NotFound { suggestions } => {
+        Resolution::NotFound { suggestions, fallback_prefix } => {
             assert!(suggestions.iter().any(|s| s.title == "Albert Einstein"), "a 1-character-off typo must still be found: {suggestions:?}");
+            assert_eq!(fallback_prefix.as_deref(), Some("Einstein"));
         }
         other => panic!("expected NotFound with suggestions, got {other:?}"),
     }
@@ -189,13 +199,51 @@ fn resolve_title_shorter_prefix_retry_is_bounded_not_one_query_per_character() {
     // bound is that this one doesn't, in exchange for never running one
     // index query per character of an arbitrarily long input.
     match lib.resolve_title("Einsteinxxxxxx").unwrap() {
-        Resolution::NotFound { suggestions } => {
+        Resolution::NotFound { suggestions, fallback_prefix } => {
             assert!(
                 !suggestions.iter().any(|s| s.title == "Albert Einstein"),
                 "a typo past the retry bound must not be found by the shortening loop: {suggestions:?}"
             );
+            assert_eq!(fallback_prefix, None);
         }
         other => panic!("expected NotFound, got {other:?}"),
+    }
+}
+
+/// A real case from the reference corpus: "xyzzyqqq" only matches via its
+/// 5-of-8-character prefix "xyzzy" (a real title elsewhere) — within the
+/// retry-count bound, but throwing away three-eighths of what was typed
+/// reads as noise, not a typo correction. A dedicated fixture, not the
+/// shared one: a redirect this short would otherwise collide with prefixes
+/// other tests in this file rely on.
+#[test]
+fn resolve_title_shorter_prefix_retry_requires_a_reasonable_fraction_of_the_query() {
+    let dir = tempfile::tempdir().unwrap();
+    let zim = dir.path().join("noise.zim");
+    let bytes = ZimBuilder::new()
+        .article("Cross_product", "Cross product", &page("Cross product", "<p>A binary operation on vectors.</p>"))
+        .redirect("Xyzzy", "Xyzzy", "Cross_product")
+        .metadata("Title", "Tiny wiki")
+        .build();
+    std::fs::File::create(&zim).unwrap().write_all(&bytes).unwrap();
+    import(&zim, &ImportOptions { heap_bytes: 20_000_000 }, &|_| {}).unwrap();
+    let lib = Library::open(&zim).unwrap();
+
+    match lib.resolve_title("Xyzzyqqq").unwrap() {
+        Resolution::NotFound { suggestions, fallback_prefix } => {
+            assert!(suggestions.is_empty(), "a prefix retaining under two-thirds of the query reads as noise, not a correction: {suggestions:?}");
+            assert_eq!(fallback_prefix, None);
+        }
+        other => panic!("expected NotFound, got {other:?}"),
+    }
+
+    // "Xyzzyq" (6 chars): "Xyzzy" (5 chars, 5/6 retained) clears the floor.
+    match lib.resolve_title("Xyzzyq").unwrap() {
+        Resolution::NotFound { suggestions, fallback_prefix } => {
+            assert!(suggestions.iter().any(|s| s.title == "Cross product"), "{suggestions:?}");
+            assert_eq!(fallback_prefix.as_deref(), Some("Xyzzy"));
+        }
+        other => panic!("expected NotFound with suggestions, got {other:?}"),
     }
 }
 

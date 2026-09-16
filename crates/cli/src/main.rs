@@ -108,7 +108,7 @@ fn main() -> Result<()> {
             let wanted = title.join(" ");
             let target = match library.resolve_title(&wanted)? {
                 Resolution::Found(t) => t,
-                Resolution::NotFound { suggestions } => match suggestions.into_iter().next() {
+                Resolution::NotFound { suggestions, .. } => match suggestions.into_iter().next() {
                     Some(s) => {
                         eprintln!("no exact match for \"{wanted}\"; showing the closest title instead: \"{}\"", s.title);
                         Target { entry: s.article, fragment: s.fragment }

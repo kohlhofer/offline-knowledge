@@ -282,6 +282,34 @@ fn read_unknown_article_is_an_error_with_suggestions() {
     assert!(err.contains("no article titled"), "{err}");
 }
 
+/// A near-miss never silently reads a different article (item 7's contract,
+/// which already held structurally here — `resolve_article` only returns
+/// `Ok` on `Resolution::Found`): `read` on a typo still errors, and when the
+/// suggestions came from a shortened prefix, the error says so instead of
+/// presenting them as an answer to the query as typed (item 8).
+#[test]
+fn read_near_miss_is_an_error_naming_the_fallback_prefix_when_one_was_used() {
+    let (_d, library) = library_with(
+        ZimBuilder::new()
+            .article("Cross_product", "Cross product", &page("Cross product", "<p>A binary operation on vectors.</p>"))
+            .redirect("Xyzzy", "Xyzzy", "Cross_product")
+            .metadata("Title", "Tiny wiki")
+            .build(),
+    );
+
+    // "Xyzzyq" (6 chars) only matches via "Xyzzy" (5 chars): isError, not a
+    // silent read of "Cross product", and the message names the prefix.
+    let err = tools::read_text(&library, "Xyzzyq", None, None).unwrap_err();
+    assert!(err.contains("titles starting with \"Xyzzy\""), "{err}");
+    assert!(err.contains("Cross product"), "{err}");
+
+    // "Xyzzyqqq" (8 chars) is far enough that even the shortened prefix
+    // ("Xyzzy", 5/8 retained) falls under the fraction floor: no
+    // suggestions at all, not "Cross product" presented as a guess.
+    let err = tools::read_text(&library, "Xyzzyqqq", None, None).unwrap_err();
+    assert!(!err.contains("Cross product"), "{err}");
+}
+
 /// The same uncapped-retry-loop cost `/wiki/{path}` had (L6) is reachable
 /// through `read` and `links` too, both via `resolve_article` — capped
 /// there rather than in each caller.

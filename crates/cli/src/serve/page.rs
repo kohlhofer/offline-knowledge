@@ -154,8 +154,10 @@ pub struct SuggestionRow {
 
 /// The not-found page: honest about the miss, with up to 5 title suggestions
 /// and a way to fall back to full-text search, both real links/forms that
-/// work with no JS.
-pub fn not_found_body(requested_path: &str, suggestions: &[SuggestionRow]) -> String {
+/// work with no JS. `fallback_prefix`, when present, names the shortened
+/// prefix `suggestions` actually matched — said explicitly, so a fallback
+/// batch doesn't read as if it answered `requested_path` as typed.
+pub fn not_found_body(requested_path: &str, suggestions: &[SuggestionRow], fallback_prefix: Option<&str>) -> String {
     let display = requested_path.replace('_', " ");
     let suggestion_list = if suggestions.is_empty() {
         String::new()
@@ -164,7 +166,11 @@ pub fn not_found_body(requested_path: &str, suggestions: &[SuggestionRow]) -> St
             .iter()
             .map(|s| format!(r#"<li><a href="{href}">{title}</a></li>"#, href = esc(&ok_core::html::wiki_href(&s.path, None)), title = esc(&s.title)))
             .collect();
-        format!(r#"<p>Maybe one of these:</p><ul class="suggestions">{items}</ul>"#)
+        let lead = match fallback_prefix {
+            Some(prefix) => format!("Titles starting with \"{}\":", esc(&prefix.replace('_', " "))),
+            None => "Maybe one of these:".to_string(),
+        };
+        format!(r#"<p>{lead}</p><ul class="suggestions">{items}</ul>"#)
     };
     format!(
         r#"<section class="not-found">

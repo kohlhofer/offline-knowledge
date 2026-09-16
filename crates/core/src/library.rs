@@ -48,12 +48,26 @@ pub struct SearchResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolution {
     Found(Target),
-    NotFound { suggestions: Vec<Suggestion> },
+    NotFound {
+        suggestions: Vec<Suggestion>,
+        /// The shortened prefix `suggestions` actually matched, when it
+        /// isn't the caller's own query verbatim: a caller says so
+        /// ("titles starting with 'Wro'") instead of presenting a
+        /// shortened-prefix batch as if it answered the query as typed.
+        fallback_prefix: Option<String>,
+    },
 }
 
 /// How many progressively shorter prefixes [`Library::suggest_with_fallback`]
 /// will try, at most.
 const MAX_PREFIX_RETRIES: usize = 5;
+
+/// A retried prefix must also retain at least this fraction of `query`'s own
+/// length: "xyzzyqqq" matching a title via its 5-of-8-character prefix
+/// "xyzzy" reads as noise, not a typo correction, even within the retry
+/// count bound above — both bounds apply, whichever is stricter.
+const MIN_PREFIX_FRACTION_NUM: usize = 2;
+const MIN_PREFIX_FRACTION_DEN: usize = 3;
 
 impl Library {
     pub fn open(zim_path: impl AsRef<Path>) -> Result<Library> {
@@ -135,7 +149,8 @@ impl Library {
             let fragment = self.stubs.get(hit.entry).and_then(|t| t.fragment);
             return Ok(Resolution::Found(Target { entry: hit.target, fragment }));
         }
-        Ok(Resolution::NotFound { suggestions: self.suggest_with_fallback(query, 5)? })
+        let (suggestions, fallback_prefix) = self.suggest_with_fallback(query, 5)?;
+        Ok(Resolution::NotFound { suggestions, fallback_prefix })
     }
 
     /// [`Self::suggest`], retrying on progressively shorter prefixes of
@@ -146,25 +161,31 @@ impl Library {
     /// at the first prefix (from longest to shortest) that returns
     /// anything, so the 404 page's suggestions aren't empty for exactly the
     /// typos it exists to catch — bounded to [`MAX_PREFIX_RETRIES`] steps
-    /// (never below 3 characters), not one query per character down to 3:
-    /// a typo is a handful of characters off, not thousands, and an
-    /// unbounded retry here was one index query per character of `query`,
-    /// with no cap on `query`'s own length.
-    fn suggest_with_fallback(&self, query: &str, limit: usize) -> Result<Vec<Suggestion>> {
+    /// and to retaining at least [`MIN_PREFIX_FRACTION_NUM`]/[`MIN_PREFIX_FRACTION_DEN`]
+    /// of `query`'s length (never below 3 characters either way), not one
+    /// query per character down to 3: a typo is a handful of characters
+    /// off, not thousands, and a match kept after throwing away a third or
+    /// more of what the caller typed reads as noise, not a correction.
+    /// Returns the prefix actually used, when it wasn't `query` itself, so
+    /// a caller can say what the list is instead of presenting it as an
+    /// answer to the query as typed.
+    pub fn suggest_with_fallback(&self, query: &str, limit: usize) -> Result<(Vec<Suggestion>, Option<String>)> {
         let hits = self.suggest(query, limit)?;
         if !hits.is_empty() {
-            return Ok(hits);
+            return Ok((hits, None));
         }
         let chars: Vec<char> = query.chars().collect();
-        let shortest = chars.len().saturating_sub(MAX_PREFIX_RETRIES).max(3);
+        let by_count = chars.len().saturating_sub(MAX_PREFIX_RETRIES);
+        let by_fraction = (chars.len() * MIN_PREFIX_FRACTION_NUM).div_ceil(MIN_PREFIX_FRACTION_DEN);
+        let shortest = by_count.max(by_fraction).max(3);
         for len in (shortest..chars.len()).rev() {
             let prefix: String = chars[..len].iter().collect();
             let hits = self.suggest(&prefix, limit)?;
             if !hits.is_empty() {
-                return Ok(hits);
+                return Ok((hits, Some(prefix)));
             }
         }
-        Ok(Vec::new())
+        Ok((Vec::new(), None))
     }
 
     /// Whether `entry` (already resolved through redirects) is a real,

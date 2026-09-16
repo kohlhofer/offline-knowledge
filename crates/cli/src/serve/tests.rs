@@ -228,6 +228,20 @@ async fn wiki_unknown_path_is_404_with_suggestions_and_a_search_all_text_link() 
     assert!(body.contains(r#"action="/search""#), "a working search-all-text fallback: {body}");
 }
 
+/// A near-miss that only resolves via the shorter-prefix fallback must not
+/// redirect (item 7), and the 404 page says the suggestions come from a
+/// shortened prefix rather than presenting them as an answer to the typo
+/// as typed (item 8).
+#[tokio::test]
+async fn wiki_near_miss_shows_the_fallback_prefix_not_a_redirect() {
+    let (_d, app) = app();
+    let res = get(&app, "/wiki/Einsteinn").await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND, "a typo must not silently redirect to a different article");
+    let body = body_text(res).await;
+    assert!(body.contains("Titles starting with \"Einstein\""), "{body}");
+    assert!(body.contains("href=\"/wiki/Albert_Einstein\""), "{body}");
+}
+
 #[tokio::test]
 async fn wiki_non_article_entry_is_404_not_500() {
     // The path exists (a real CSS resource in the ZIM's article namespace),
