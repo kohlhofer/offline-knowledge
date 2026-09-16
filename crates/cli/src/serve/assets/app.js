@@ -300,21 +300,47 @@ if (article && "IntersectionObserver" in window) {
   // which heading is current is always found directly below, in document
   // order, so scrolling up out of a section (with no heading newly
   // *entering* the band) still updates the breadcrumb, not just scrolling
-  // down into one.
+  // down into one. An instant jump — an outline link, back/forward, the
+  // page loading with a fragment already in the URL — never crosses the
+  // line frame by frame, so the observer alone missed it (landing on
+  // "#Death" left the breadcrumb blank) or left it naming wherever the
+  // reader jumped *from* (returning to the top named a section three
+  // screens away): a `scroll` handler and a `hashchange` handler both call
+  // this too, and it's cleared, not left stale, when no heading qualifies.
+  // Above app.css's scroll-padding-top (5.6rem, ~90px), with a few pixels
+  // of headroom for subpixel scroll rounding: a heading a fragment jump
+  // just landed on sits at that offset, not 0, so a tighter line here
+  // would call it "not current yet" the instant the jump lands.
+  const BREADCRUMB_LINE_PX = 96;
+
   function updateBreadcrumb() {
     let current = null;
     for (const h of headings) {
-      if (h.getBoundingClientRect().top <= 80) current = h;
+      if (h.getBoundingClientRect().top <= BREADCRUMB_LINE_PX) current = h;
       else break;
     }
     if (current) {
       breadcrumb.textContent = current.dataset.path;
       currentHeadingId = current.id;
+    } else {
+      breadcrumb.textContent = "";
+      currentHeadingId = null;
     }
   }
 
   const observer = new IntersectionObserver(updateBreadcrumb, { rootMargin: "0px 0px -80% 0px" });
   headings.forEach((h) => observer.observe(h));
+
+  let breadcrumbScrollScheduled = false;
+  window.addEventListener("scroll", () => {
+    if (breadcrumbScrollScheduled) return;
+    breadcrumbScrollScheduled = true;
+    requestAnimationFrame(() => {
+      breadcrumbScrollScheduled = false;
+      updateBreadcrumb();
+    });
+  });
+  window.addEventListener("hashchange", updateBreadcrumb);
 }
 
 // ---------------------------------------------------------------------
