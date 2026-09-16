@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 
 use ok_core::document::{Block, Document, Link, inline_text, truncate_words};
-use ok_core::text::sanitize;
+use ok_core::text::{sanitize, sanitize_line};
 use ok_core::{Library, Resolution, Suggestion};
 
 const SEARCH_SUMMARY_CHARS: usize = 140;
@@ -21,6 +21,24 @@ const MAX_SUGGESTIONS: usize = 5;
 /// which could contain a crafted line made to look like tool framing.
 const ARTICLE_TEXT_OPEN: &str = "<article-text>";
 const ARTICLE_TEXT_CLOSE: &str = "</article-text>";
+
+/// Escapes both fence markers wherever they appear verbatim in article
+/// text. Article prose already contains literal `</h1>` and `</html>`, and
+/// `&lt;/article-text&gt;` in ZIM HTML source decodes to a literal closing
+/// tag by the time it reaches here — either would close a fence early and
+/// have the rest of the response read as server-written framing instead of
+/// article content. Apply to every string inserted *inside* a fence, never
+/// to the fence markers this module writes itself.
+fn defuse_fence_markers(text: &str) -> String {
+    text.replace(ARTICLE_TEXT_CLOSE, "&lt;/article-text&gt;").replace(ARTICLE_TEXT_OPEN, "&lt;article-text&gt;")
+}
+
+/// Marks a single article-derived string — a title, a heading — as data,
+/// not server framing, for the fields that sit outside the larger prose
+/// fences: search result lines, `links`' titles, and `read`'s header line.
+fn fence_inline(text: &str) -> String {
+    format!("{ARTICLE_TEXT_OPEN}{}{ARTICLE_TEXT_CLOSE}", defuse_fence_markers(text))
+}
 
 /// Title matches (via `Library::suggest`) first, then full-text matches,
 /// deduplicated by article and capped at `limit`. Title matches never parse
@@ -37,8 +55,10 @@ pub fn search_text(library: &Library, query: &str, limit: usize) -> Result<Strin
     let mut lines: Vec<String> = title_hits
         .iter()
         .map(|s| match &s.matched {
-            Some(alias) => format!("{} — title match via \"{}\"", sanitize(&s.title), sanitize(alias)),
-            None => sanitize(&s.title),
+            Some(alias) => {
+                format!("{} — title match via \"{}\"", fence_inline(&sanitize_line(&s.title)), fence_inline(&sanitize_line(alias)))
+            }
+            None => fence_inline(&sanitize_line(&s.title)),
         })
         .collect();
 
@@ -46,8 +66,8 @@ pub fn search_text(library: &Library, query: &str, limit: usize) -> Result<Strin
         let text_hits = library.search(query, limit).map_err(|e| lookup_error(query, e))?;
         for hit in text_hits {
             if seen.insert(hit.article) {
-                let summary = truncate_words(&sanitize(&hit.summary), SEARCH_SUMMARY_CHARS);
-                lines.push(format!("{} — {}", sanitize(&hit.title), summary));
+                let summary = truncate_words(&sanitize_line(&hit.summary), SEARCH_SUMMARY_CHARS);
+                lines.push(format!("{} — {}", fence_inline(&sanitize_line(&hit.title)), fence_inline(&summary)));
             }
         }
     }
@@ -112,10 +132,10 @@ pub fn links_text(library: &Library, article: &str, section: Option<&str>) -> Re
         None => (target.fragment.as_deref(), true),
     };
     let (links, scope): (Vec<Link>, String) = match spec {
-        None => (doc.links().cloned().collect(), sanitize(&doc.title)),
+        None => (doc.links().cloned().collect(), fence_inline(&sanitize_line(&doc.title))),
         Some(spec) => match resolve_section(&doc, spec, !from_redirect) {
-            Some(index) => (doc.section_links(index).cloned().collect(), sanitize(&doc.sections[index].heading)),
-            None if from_redirect => (doc.links().cloned().collect(), sanitize(&doc.title)),
+            Some(index) => (doc.section_links(index).cloned().collect(), fence_inline(&sanitize_line(&doc.sections[index].heading))),
+            None if from_redirect => (doc.links().cloned().collect(), fence_inline(&sanitize_line(&doc.title))),
             None => return Err(unresolvable_section_message(&doc, spec)),
         },
     };
@@ -129,7 +149,7 @@ pub fn links_text(library: &Library, article: &str, section: Option<&str>) -> Re
             Link::Article { entry, .. } => {
                 if seen_articles.insert(entry) {
                     match library.title(entry) {
-                        Ok(title) => titles.push(sanitize(&title)),
+                        Ok(title) => titles.push(fence_inline(&sanitize_line(&title))),
                         // A dangling entry index is this codebase's problem to log, never
                         // the agent's to see (no entry indices in tool output).
                         Err(e) => eprintln!("mcp links: title lookup for entry {entry} failed: {e}"),
@@ -229,10 +249,10 @@ fn read_overview(doc: &Document) -> String {
     let (totals, ends) = section_stats(doc);
     let mut out = format!(
         "{} · {} chars · {} sections\n\n{ARTICLE_TEXT_OPEN}\n{}",
-        sanitize(&doc.title),
+        fence_inline(&sanitize_line(&doc.title)),
         totals[0],
         doc.sections.len(),
-        paragraphs.join("\n\n")
+        defuse_fence_markers(&paragraphs.join("\n\n"))
     );
 
     let facts: Vec<(&str, String)> = lead
@@ -250,7 +270,10 @@ fn read_overview(doc: &Document) -> String {
         let lines: Vec<String> = facts
             .iter()
             .take(MAX_FACTS)
-            .map(|(label, value)| if label.is_empty() { value.clone() } else { format!("{}: {value}", sanitize(label)) })
+            .map(|(label, value)| {
+                let value = defuse_fence_markers(value);
+                if label.is_empty() { value } else { format!("{}: {value}", defuse_fence_markers(&sanitize(label))) }
+            })
             .collect();
         out.push_str(&lines.join("\n"));
         if facts.len() > MAX_FACTS {
@@ -356,7 +379,9 @@ fn read_section(doc: &Document, index: usize, offset: usize) -> Result<String, S
     let end_byte = byte_offset_at(body, end_char);
     let slice = &body[start_byte..end_byte];
 
-    let mut out = format!("{heading} ({total} chars)\n\n{ARTICLE_TEXT_OPEN}\n{slice}\n{ARTICLE_TEXT_CLOSE}");
+    let display_heading = fence_inline(&sanitize_line(&doc.sections[index].heading));
+    let mut out =
+        format!("{display_heading} ({total} chars)\n\n{ARTICLE_TEXT_OPEN}\n{}\n{ARTICLE_TEXT_CLOSE}", defuse_fence_markers(slice));
     if end_char < total {
         out.push_str(&format!("\n\n…[truncated: call read with offset={end_char}]"));
     }
