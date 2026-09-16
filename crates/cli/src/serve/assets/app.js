@@ -95,6 +95,7 @@ function renderSuggestions(items, query) {
     const li = document.createElement("li");
     li.id = `suggestion-${i}`;
     li.setAttribute("role", "option");
+    li.setAttribute("aria-selected", "false");
     li.dataset.href = `/wiki/${encodeURIComponent(item.path).replace(/%2F/g, "/")}${item.fragment ? "#" + encodeURIComponent(item.fragment) : ""}`;
     li.textContent = item.matched ? `${item.matched} → ${item.title}` : item.title;
     suggestions.appendChild(li);
@@ -102,6 +103,7 @@ function renderSuggestions(items, query) {
   const searchAll = document.createElement("li");
   searchAll.id = `suggestion-${items.length}`;
   searchAll.setAttribute("role", "option");
+  searchAll.setAttribute("aria-selected", "false");
   searchAll.dataset.href = `/search?q=${encodeURIComponent(query)}`;
   searchAll.textContent = `Search all text for "${query}"`;
   suggestions.appendChild(searchAll);
@@ -164,6 +166,16 @@ input.addEventListener("keydown", (e) => {
   }
 });
 
+// The listbox otherwise stayed open (and aria-expanded stayed "true")
+// after focus or a click left the search box entirely.
+const searchbar = document.querySelector(".searchbar");
+searchbar.addEventListener("focusout", (e) => {
+  if (!searchbar.contains(e.relatedTarget)) closeSuggestions();
+});
+document.addEventListener("click", (e) => {
+  if (!suggestions.hidden && !e.target.closest(".searchbar")) closeSuggestions();
+});
+
 // ---------------------------------------------------------------------
 // Outline dialog: built from this page's own headings, not a server call.
 // ---------------------------------------------------------------------
@@ -189,27 +201,39 @@ let currentHeadingId = null;
 function renderOutline(sections, matches) {
   const list = document.createElement("ul");
   list.id = "outline-list";
-  for (const i of matches) {
+  matches.forEach((i, matchIndex) => {
     const s = sections[i];
     const a = document.createElement("a");
     a.href = `#${s.id}`;
     a.dataset.closeOutline = "";
     if (s.id === currentHeadingId) a.setAttribute("aria-current", "true");
+    // Enter always jumps to the first item in the (filtered) list — marked
+    // here too, distinct from aria-current, so that target is visible.
+    if (matchIndex === 0) {
+      a.id = "outline-first-match";
+      a.setAttribute("data-first-match", "");
+    }
     const indent = " ".repeat(Math.max(0, s.level - 2));
     a.textContent = `${indent}${s.path}`;
     const li = document.createElement("li");
     li.appendChild(a);
     list.appendChild(li);
-  }
-  outlineDialog.innerHTML = `<input type="text" id="outline-filter" placeholder="Filter sections" autocomplete="off">`;
+  });
+  outlineDialog.innerHTML = `<input type="text" id="outline-filter" placeholder="Filter sections" aria-label="Filter sections" autocomplete="off">`;
   outlineDialog.appendChild(list);
-  outlineDialog.querySelector("#outline-filter").value = outlineQuery;
+  const filterInput = outlineDialog.querySelector("#outline-filter");
+  filterInput.value = outlineQuery;
+  if (matches.length > 0) filterInput.setAttribute("aria-activedescendant", "outline-first-match");
+  else filterInput.removeAttribute("aria-activedescendant");
   outlineDialog.querySelector("[aria-current]")?.scrollIntoView({ block: "center" });
 }
 
 function openOutline() {
   const sections = articleSections();
-  if (sections.length === 0) return;
+  if (sections.length === 0) {
+    announce("no headings on this page");
+    return;
+  }
   outlineQuery = "";
   renderOutline(sections, filterOutline(sections, outlineQuery));
   outlineDialog.showModal();
@@ -257,16 +281,25 @@ outlineDialog.addEventListener("click", (e) => {
 
 if (article && "IntersectionObserver" in window) {
   const headings = Array.from(article.querySelectorAll("h1[data-path], h2[data-path], h3[data-path], h4[data-path], h5[data-path], h6[data-path]"));
-  const observer = new IntersectionObserver(
-    (entries) => {
-      const visible = entries.filter((e) => e.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
-      if (visible.length > 0) {
-        breadcrumb.textContent = visible[0].target.dataset.path;
-        currentHeadingId = visible[0].target.id;
-      }
-    },
-    { rootMargin: "0px 0px -80% 0px" }
-  );
+
+  // The observer is only a "something crossed the line, recompute" trigger:
+  // which heading is current is always found directly below, in document
+  // order, so scrolling up out of a section (with no heading newly
+  // *entering* the band) still updates the breadcrumb, not just scrolling
+  // down into one.
+  function updateBreadcrumb() {
+    let current = null;
+    for (const h of headings) {
+      if (h.getBoundingClientRect().top <= 80) current = h;
+      else break;
+    }
+    if (current) {
+      breadcrumb.textContent = current.dataset.path;
+      currentHeadingId = current.id;
+    }
+  }
+
+  const observer = new IntersectionObserver(updateBreadcrumb, { rootMargin: "0px 0px -80% 0px" });
   headings.forEach((h) => observer.observe(h));
 }
 
@@ -302,8 +335,15 @@ window.addEventListener("resize", () => {
 
 function focusAdjacentLink(forward) {
   const { links, tops } = getLinkCache();
-  if (links.length === 0) return;
+  if (links.length === 0) {
+    announce("no links on this page");
+    return;
+  }
   const next = nextLinkIndex(tops, window.scrollY, window.innerHeight, selectedLinkIndex, forward);
+  if (next === selectedLinkIndex) {
+    announce(forward ? "no more links" : "no earlier links");
+    return;
+  }
   selectedLinkIndex = next;
   links[next].focus();
   links[next].scrollIntoView({ block: "nearest" });
