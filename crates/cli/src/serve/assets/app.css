@@ -39,8 +39,11 @@ button {
 }
 
 html {
-  /* Clears the sticky header on an outline jump or a #fragment link. */
-  scroll-padding-top: 5rem;
+  /* Clears the sticky header on an outline jump or a #fragment link. Kept
+     here only — a matching scroll-margin-top on every heading used to
+     stack with this, landing a target heading 160px down instead of the
+     ~89px the header actually needs. */
+  scroll-padding-top: 5.6rem;
 }
 
 body {
@@ -225,17 +228,6 @@ article {
      rather than push the page sideways, especially at a phone width. */
   overflow-wrap: break-word;
   line-height: 1.6;
-}
-
-article h1,
-article h2,
-article h3,
-article h4,
-article h5,
-article h6 {
-  /* Clears the sticky header on an outline jump or a #fragment link, same
-     as html's scroll-padding-top — belt and suspenders across browsers. */
-  scroll-margin-top: 5rem;
 }
 
 article h1 {
