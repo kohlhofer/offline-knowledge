@@ -102,6 +102,10 @@ header.chrome {
 
 .searchbar input[type="text"] {
   flex: 1;
+  /* A flex item's default min-width is its content's, not 0 — an
+     `<input>`'s is wide enough that the searchbar pushed the page wider
+     than a phone's viewport instead of shrinking. */
+  min-width: 0;
   min-height: 44px;
   padding: 0.45rem 0.7rem;
   border: 1px solid var(--border);
@@ -117,6 +121,16 @@ header.chrome {
   background: var(--surface);
   cursor: pointer;
   white-space: nowrap;
+}
+
+@media (max-width: 30rem) {
+  .searchbar button {
+    /* Same reason as the input's min-width above: nowrap's min-content
+       width is the whole label, which a phone-width searchbar has no room
+       for — wrapping lets the button shrink instead of clipping mid-word. */
+    white-space: normal;
+    text-align: center;
+  }
 }
 
 #suggestions {
