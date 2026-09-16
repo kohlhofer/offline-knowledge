@@ -413,6 +413,27 @@ pub fn wiki_href(path: &str, fragment: Option<&str>) -> String {
     out
 }
 
+/// A percent-encoded `/wiki/{path}?redirected_from={redirected_from}[#fragment]`
+/// href: `redirected_from` is the path originally requested, round-tripped
+/// through the query string so the target page can say "Redirected from X"
+/// without the server needing to remember anything about the request that
+/// produced it. `PATH_SAFE` is a safe (if slightly more conservative than
+/// necessary) encoding for a query value too — `/` is the only reserved
+/// query character it leaves unescaped, and an unescaped `/` needs no
+/// escaping there.
+pub fn wiki_href_redirected_from(path: &str, fragment: Option<&str>, redirected_from: &str) -> String {
+    let mut out = String::with_capacity(path.len() + redirected_from.len() + 24);
+    out.push_str("/wiki/");
+    push_encoded(&mut out, path);
+    out.push_str("?redirected_from=");
+    push_encoded(&mut out, redirected_from);
+    if let Some(fragment) = fragment {
+        out.push('#');
+        push_encoded(&mut out, fragment);
+    }
+    out
+}
+
 /// Sanitizes (strips control characters other than `\n`, and bidi
 /// overrides) and HTML-escapes `s` in one pass, appending straight into
 /// `out` — no intermediate `String` for either step. Every piece of
@@ -451,4 +472,21 @@ pub fn escape_html(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wiki_href_redirected_from_encodes_path_query_and_fragment() {
+        assert_eq!(wiki_href_redirected_from("Albert_Einstein", None, "Einstein"), "/wiki/Albert_Einstein?redirected_from=Einstein");
+        assert_eq!(
+            wiki_href_redirected_from("Albert_Einstein", Some("Life"), "Einstein early life"),
+            "/wiki/Albert_Einstein?redirected_from=Einstein%20early%20life#Life"
+        );
+        // A redirected-from value containing `&` or `=` must not be able to
+        // inject a second query parameter.
+        assert_eq!(wiki_href_redirected_from("A", None, "a&b=c"), "/wiki/A?redirected_from=a%26b%3Dc");
+    }
 }

@@ -208,7 +208,11 @@ fn render_article(library: &Library, cache: &ArticleCache, path: &str) -> ok_cor
         Resolution::Found(target) => {
             let canonical = library.path(target.entry)?;
             if canonical != path || target.fragment.is_some() {
-                let location = ok_core::html::wiki_href(&canonical, target.fragment.as_deref());
+                // Round-trips the requested path through the query string so
+                // the target page can say "Redirected from X" (N13): landing
+                // mid-article, on a differently titled page, with no
+                // indication of how the reader got there otherwise.
+                let location = ok_core::html::wiki_href_redirected_from(&canonical, target.fragment.as_deref(), path);
                 return Ok(ArticleOutcome::Redirect { location });
             }
             if let Some(cached) = cache.get(target.entry) {
@@ -230,11 +234,24 @@ fn render_article(library: &Library, cache: &ArticleCache, path: &str) -> ok_cor
     Ok(ArticleOutcome::NotFound { suggestions: rows, fallback_prefix })
 }
 
+#[derive(Deserialize)]
+pub struct WikiArticleParams {
+    redirected_from: Option<String>,
+}
+
 /// The only article route: canonical, shareable `/wiki/{path}` URLs.
-pub async fn wiki_article(State(library): State<Arc<Library>>, State(cache): State<ArticleCache>, AxumPath(path): AxumPath<String>) -> Response {
+pub async fn wiki_article(
+    State(library): State<Arc<Library>>,
+    State(cache): State<ArticleCache>,
+    AxumPath(path): AxumPath<String>,
+    Query(params): Query<WikiArticleParams>,
+) -> Response {
     if query_too_long(&path) {
         return bad_request_html(&format!("a path accepts at most {MAX_QUERY_CHARS} characters"));
     }
+    // Cosmetic only (the banner below): an oversized value is ignored
+    // rather than failing the whole page load over it.
+    let redirected_from = params.redirected_from.filter(|s| !query_too_long(s));
     let lib = Arc::clone(&library);
     let requested = path.clone();
     let outcome = match tokio::task::spawn_blocking(move || render_article(&lib, &cache, &requested)).await {
@@ -245,7 +262,8 @@ pub async fn wiki_article(State(library): State<Arc<Library>>, State(cache): Sta
     match outcome {
         ArticleOutcome::Found { title, html } => {
             let page_title = format!("{title} — {}", library.meta().title);
-            html_ok("no-cache", page::shell(&page_title, &library.meta().title, None, &page::article_body(&html)))
+            let body = page::article_body(&html, redirected_from.as_deref());
+            html_ok("no-cache", page::shell(&page_title, &library.meta().title, None, &body))
         }
         ArticleOutcome::Redirect { location } => {
             (StatusCode::FOUND, [(header::LOCATION, location), (header::CACHE_CONTROL, "no-store".to_string())]).into_response()

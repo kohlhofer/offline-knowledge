@@ -143,8 +143,17 @@ pub struct SuggestDto {
     pub inbound: u32,
 }
 
-pub fn article_body(html: &str) -> String {
-    format!(r#"<article id="article">{html}</article>"#)
+/// `redirected_from`, when present, names the path originally requested —
+/// a redirect (title or section) landed the reader here instead, and
+/// without this note there's no indication of how (N13). Shown as its own
+/// line right above the article, same placement convention as Wikipedia's
+/// own "(Redirected from X)".
+pub fn article_body(html: &str, redirected_from: Option<&str>) -> String {
+    let note = match redirected_from {
+        Some(from) => format!(r#"<p class="redirect-note">Redirected from "{}"</p>"#, esc(&from.replace('_', " "))),
+        None => String::new(),
+    };
+    format!(r#"<article id="article">{note}{html}</article>"#)
 }
 
 pub struct SuggestionRow {

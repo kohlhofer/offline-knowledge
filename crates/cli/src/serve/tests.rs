@@ -191,7 +191,9 @@ async fn wiki_path_resolved_by_title_redirects_to_the_canonical_path() {
     let (_d, app) = app();
     let res = get(&app, "/wiki/Einstein").await;
     assert_eq!(res.status(), StatusCode::FOUND);
-    assert_eq!(res.headers().get("location").unwrap(), "/wiki/Albert_Einstein");
+    // redirected_from round-trips the requested path so the target page can
+    // say "Redirected from Einstein" (N13) — not just the bare canonical URL.
+    assert_eq!(res.headers().get("location").unwrap(), "/wiki/Albert_Einstein?redirected_from=Einstein");
     assert_eq!(res.headers().get("cache-control").unwrap(), "no-store");
 }
 
@@ -200,7 +202,22 @@ async fn wiki_section_redirect_redirects_to_the_canonical_path_with_its_fragment
     let (_d, app) = app();
     let res = get(&app, "/wiki/Einstein_early_life").await;
     assert_eq!(res.status(), StatusCode::FOUND);
-    assert_eq!(res.headers().get("location").unwrap(), "/wiki/Albert_Einstein#Life");
+    assert_eq!(res.headers().get("location").unwrap(), "/wiki/Albert_Einstein?redirected_from=Einstein_early_life#Life");
+}
+
+/// The target page names the section redirect it came from (N13): landing
+/// mid-article, on a differently titled page, with no indication of how.
+#[tokio::test]
+async fn wiki_article_shows_a_redirected_from_note_when_the_query_param_is_present() {
+    let (_d, app) = app();
+    let res = get(&app, "/wiki/Albert_Einstein?redirected_from=Einstein_early_life").await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_text(res).await;
+    assert!(body.contains(r#"<p class="redirect-note">Redirected from "Einstein early life"</p>"#), "{body}");
+
+    // No note at all when the param is absent — the ordinary case.
+    let body = body_text(get(&app, "/wiki/Albert_Einstein").await).await;
+    assert!(!body.contains("redirect-note"), "{body}");
 }
 
 #[tokio::test]

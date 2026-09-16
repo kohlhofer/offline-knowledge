@@ -169,6 +169,19 @@ fn read_without_section_shows_lead_facts_and_a_top_level_outline() {
     assert!(!text.contains("Born in Ulm"), "the Life section's body must not appear in the overview: {text}");
 }
 
+/// A plain title redirect (not a section-redirect stub) loses provenance
+/// the same way: an agent that asked for "Einstein" and silently got
+/// "Albert Einstein" back could misattribute the text without this.
+#[test]
+fn read_title_redirect_names_the_requested_title() {
+    let (_d, library) = imported();
+    let text = tools::read_text(&library, "Einstein", None, None).unwrap();
+    assert!(text.starts_with("Redirected from \"Einstein\" to <article-text>Albert Einstein</article-text>\n"), "{text}");
+
+    let links = tools::links_text(&library, "Einstein", None).unwrap();
+    assert!(links.starts_with("Redirected from \"Einstein\" to <article-text>Albert Einstein</article-text>\n"), "{links}");
+}
+
 /// `&lt;/article-text&gt;` in an article's HTML source decodes, like any
 /// other HTML entity, to a literal `</article-text>` by the time it reaches
 /// `read`'s output. Unescaped, that closes the fence early and lets
@@ -274,7 +287,14 @@ fn read_section_does_not_print_the_heading_twice() {
 fn read_section_redirect_with_no_explicit_section_opens_that_section() {
     let (_d, library) = imported();
     let text = tools::read_text(&library, "Einstein early life", None, None).unwrap();
-    assert!(text.starts_with("<article-text>Life</article-text> ("), "{text}");
+    // The section redirect's own title never appears past this note, so an
+    // agent can't attribute the "Life" section's text to "Einstein early
+    // life" instead of the article that actually contains it.
+    assert!(
+        text.starts_with("Redirected from \"Einstein early life\" to <article-text>Albert Einstein</article-text>\n"),
+        "{text}"
+    );
+    assert!(text.contains("<article-text>Life</article-text> ("), "{text}");
     assert!(text.contains("Born in Ulm"), "{text}");
 }
 
@@ -282,8 +302,9 @@ fn read_section_redirect_with_no_explicit_section_opens_that_section() {
 fn read_section_redirect_with_an_unmatched_fragment_falls_back_to_the_overview() {
     let (_d, library) = imported();
     let text = tools::read_text(&library, "Stale reference", None, None).unwrap();
+    assert!(text.starts_with("Redirected from \"Stale reference\" to "), "{text}");
     assert!(
-        text.starts_with("<article-text>Albert Einstein</article-text> · "),
+        text.contains("<article-text>Albert Einstein</article-text> · "),
         "a section redirect whose fragment matches nothing must not error: {text}"
     );
 }

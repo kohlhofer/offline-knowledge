@@ -115,11 +115,12 @@ pub(super) fn search_header(shown: usize, limit: usize, query: &str) -> String {
 pub fn read_text(library: &Library, article: &str, section: Option<&str>, offset: Option<usize>) -> Result<String, String> {
     let target = resolve_article(library, article)?;
     let doc = library.article(target.entry).map_err(|e| lookup_error(article, e))?;
+    let note = redirect_note(article, &doc.title);
     let (spec, from_redirect) = match section {
         Some(s) => (Some(s), false),
         None => (target.fragment.as_deref(), true),
     };
-    match spec {
+    let body = match spec {
         None => Ok(read_overview(&doc)),
         Some(spec) => match resolve_section(&doc, spec, !from_redirect) {
             Some(index) => read_section(&doc, index, offset.unwrap_or(0)),
@@ -127,7 +128,25 @@ pub fn read_text(library: &Library, article: &str, section: Option<&str>, offset
             None if from_redirect => Ok(read_overview(&doc)),
             None => Err(unresolvable_section_message(&doc, spec)),
         },
+    };
+    match (body, note) {
+        (Ok(text), Some(note)) => Ok(format!("{note}\n{text}")),
+        (result, _) => result,
     }
+}
+
+/// `requested` reaching `canonical_title` through anything other than its
+/// own exact title (a redirect, an alias, a section-redirect stub) loses
+/// that provenance once the response only ever names `canonical_title`: an
+/// agent that asked for one title and silently got a differently titled
+/// article can misattribute the text it reads back. `None` when they agree
+/// (up to case, accents and underscore/space folding — the same equality
+/// `resolve_title` itself uses for an exact match).
+fn redirect_note(requested: &str, canonical_title: &str) -> Option<String> {
+    if ok_core::normalize::normalize(requested) == ok_core::normalize::normalize(canonical_title) {
+        return None;
+    }
+    Some(format!("Redirected from \"{}\" to {}", sanitize_line(requested), fence_inline(&sanitize_line(canonical_title))))
 }
 
 /// Deduplicated by target entry, first-seen order, titles only. The trailing
@@ -136,6 +155,7 @@ pub fn read_text(library: &Library, article: &str, section: Option<&str>, offset
 pub fn links_text(library: &Library, article: &str, section: Option<&str>) -> Result<String, String> {
     let target = resolve_article(library, article)?;
     let doc = library.article(target.entry).map_err(|e| lookup_error(article, e))?;
+    let note = redirect_note(article, &doc.title);
     let (spec, from_redirect) = match section {
         Some(s) => (Some(s), false),
         None => (target.fragment.as_deref(), true),
@@ -188,7 +208,10 @@ pub fn links_text(library: &Library, article: &str, section: Option<&str>) -> Re
         out.push_str("\n+");
         out.push_str(&counts.join(", "));
     }
-    Ok(out)
+    Ok(match note {
+        Some(note) => format!("{note}\n{out}"),
+        None => out,
+    })
 }
 
 /// Matches the web UI's own cap on a `/wiki/{path}` segment: `resolve_title`
