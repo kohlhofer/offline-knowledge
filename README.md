@@ -1,8 +1,43 @@
 # offline-knowledge
 
-A fast, fully offline reader for Wikipedia and other Kiwix ZIM collections, built to run as a small appliance: one binary in an Apple `container` today, a dedicated machine later. You type, titles appear as you type, and following a link takes a few milliseconds.
+Wikipedia read at the speed of a local file. Titles appear 0.2 ms after a keystroke, an article loads and renders in about 5 ms, and the library opens in 10. A terminal reader, a web UI and an MCP server for agents all read one imported index through `ok-core`'s `Library`, so the numbers below hold for whichever one you use.
 
-The first collection is Kiwix's selection of the best 50,000 English Wikipedia articles (`wikipedia_en_top_nopic`, 2.1 GB). The terminal reader, a web UI (`ok serve`) and an MCP server for agents (`ok mcp`) all read the same imported index through `ok-core`'s `Library`.
+The collection is a file on your disk. Nothing is fetched, no service is called, and no account exists, which is the second reason this project exists: the data stays available and unchanged whether or not anyone else is still serving it.
+
+## Speed
+
+`ok bench --samples 500 --http` on an M3 MacBook Air (16 GB, macOS 26.5), release build, warm page cache, 2026-09-15, against Kiwix's 50,000-article English Wikipedia (`wikipedia_en_top_nopic`, 2.1 GB):
+
+| Operation | p50 | p99 | max |
+| --- | --- | --- | --- |
+| Open library | 9.7 ms | | |
+| Title suggestions (1 to 6 characters) | 0.20 ms | 12 ms | 16 ms |
+| Load and parse an article | 4.1 ms | 12 ms | 13 ms |
+| Lay out at 100 columns | 0.32 ms | 1.0 ms | 1.3 ms |
+| Follow a link (load, parse, layout) | 5.7 ms | 17 ms | 26 ms |
+| Full-text search, a title word | 0.21 ms | 1.4 ms | 3.1 ms |
+| Full-text search, a common word | 0.50 ms | 3.9 ms | 3.9 ms |
+| `GET /wiki/{path}` over HTTP, cache miss (resolve + load + parse + render) | 4.2 ms | 12 ms | 17 ms |
+
+The terminal reader pays no startup cost beyond that first row: only `serve`, `mcp` and `bench --http` construct a tokio runtime, so the TUI and the one-shot commands (`ok suggest`, `ok search`, `ok show --json`) start, answer and exit.
+
+The web UI costs what the reader costs plus HTTP. A first visit to an article is the `GET /wiki/{path}` row; a revisit is about 0.2 ms, served from an LRU of rendered articles. Rendering itself was the one thing the first pass called unmeasurable, and it was wrong: fusing sanitize and HTML-escaping into a single pass over the output buffer, and dropping the per-run temporary `String`s and per-heading `format!` calls, took Demographics of the United States (2.17 MB of source HTML, the largest article here) from 3.08 ms to 0.46 ms and Albert Einstein from 1.13 ms to 0.34 ms, byte-identical over 498 real articles.
+
+`ok mcp` spends tokens the way the others spend milliseconds. `read` on Albert Einstein, 68 sections, returns 6,176 bytes, roughly 1,530 tokens, because the default outline lists top-level sections only and says how many subsections each one hides. `search "general relativity"` returns 1,172 bytes for 8 hits, `read` on the article's largest section returns 6,115 bytes, and `links` on that section returns 2,250 bytes covering 136 unique articles. Identifiers are always titles or paths, never entry indices, so an agent can round-trip what it reads.
+
+Speed comes from the import rather than from caching. Each ZIM file is read once into an FST of titles ranked by inbound links and a Tantivy full-text index, about 90 seconds and 154 MB for these 2.1 GB. After that every read is a memory-mapped lookup: no daemon to warm, no query planner, no network.
+
+The slow end of suggestions is one- and two-letter prefixes, which scan tens of thousands of titles. Precomputing those is the obvious next step if it ever shows in use.
+
+Inside Apple's `container` (1.3.1, default 4 CPUs and 1 GB, ZIM on a virtiofs bind mount, host cache warm), an earlier run before `serve` and `mcp` existed stayed within a few milliseconds of native: suggestions p99 20 ms, article loads p99 21 ms, link follows p99 29 ms, searches p99 3.5 ms for a title word and 11 ms for a common one, 29 ms to open the library. The HTTP and MCP paths have not been re-measured there.
+
+The release binary is 16 MB with `axum`, `tokio` and `rmcp` in it, against 10 MB for the reader alone. A clean `cargo build --release -p ok` takes about 75 s from an empty dependency graph, 23 s once third-party crates are built.
+
+## Independent Access
+
+The appliance is built to keep working when nothing else does. It runs from one 2.1 GB file plus its index, and it never opens a socket it was not told to open. In Apple's `container` on an `--internal` network the reader, `ok bench` and `ok serve` all work with no route to the internet at all, which is the arrangement I use to prove there is no hidden fetch.
+
+A machine with no egress still gets the encyclopedia, and an agent can consult it without the question leaving the host. Kiwix publishes collections at every size, a few hundred megabytes of Simple English up to the full encyclopedia at around 100 GB, and the same binary reads any of them.
 
 ## Quick Start
 
@@ -20,7 +55,7 @@ export OK_ZIM=data/wikipedia_en_top_nopic_2026-06.zim
 ./target/release/ok            # the reader
 ```
 
-`ok suggest <prefix>`, `ok search <words>` and `ok show <title> [--json]` print to stdout, and `ok bench` times everything below.
+`ok suggest <prefix>`, `ok search <words>` and `ok show <title> [--json]` print to stdout, and `ok bench` reproduces the table above.
 
 ```sh
 ./target/release/ok serve --bind 127.0.0.1:8080   # web UI, http://127.0.0.1:8080
@@ -36,7 +71,7 @@ container run -it --rm --network offline -v "$PWD/data:/data" offline-knowledge:
 container run -it --rm --network offline -p 127.0.0.1:8080:8080 -v "$PWD/data:/data" offline-knowledge:dev serve --bind 0.0.0.0:8080
 ```
 
-The image is Debian 13 slim plus the `ok` binary. On the `offline` network the container has no route to the internet, and the reader, `ok bench` and `ok serve` all work there. `ok mcp` talks stdio, so it runs the same way through `container exec -i <container> ok mcp` rather than a published port. So far the import has only run on the Mac; it writes the index next to the ZIM in `data/`, which the container then reads through the mount.
+The image is Debian 13 slim plus the `ok` binary. `ok mcp` talks stdio, so it runs through `container exec -i <container> ok mcp` rather than a published port. So far the import has only run on the Mac; it writes the index next to the ZIM in `data/`, which the container then reads through the mount.
 
 ## Keys
 
@@ -68,38 +103,13 @@ Web UI (`ok serve`), same shape with browser-native equivalents where they exist
 | ? | help dialog |
 | Space, PgUp/PgDn, Home/End, browser Back/Forward | native scroll and history |
 
-## Speed
-
-`ok bench --samples 500 --http` on the M3 MacBook Air (16 GB, macOS 26.5), release build, warm page cache, 2026-09-15, after the round-2 speed pass (a fused sanitize+escape `to_html`, a rendered-article cache, `spawn_blocking` for `/api/suggest`):
-
-| Operation | p50 | p99 | max |
-| --- | --- | --- | --- |
-| Open library | 9.7 ms | | |
-| Title suggestions (1 to 6 characters) | 0.20 ms | 12 ms | 16 ms |
-| Load and parse an article | 4.1 ms | 12 ms | 13 ms |
-| Lay out at 100 columns | 0.32 ms | 1.0 ms | 1.3 ms |
-| Follow a link (load, parse, layout) | 5.7 ms | 17 ms | 26 ms |
-| Full-text search, a title word | 0.21 ms | 1.4 ms | 3.1 ms |
-| Full-text search, a common word | 0.50 ms | 3.9 ms | 3.9 ms |
-| `GET /wiki/{path}` over HTTP, cache miss (resolve + load + parse + render) | 4.2 ms | 12 ms | 17 ms |
-
-`Document::to_html` is measurable — the first pass's claim that it wasn't held only because the per-run allocations it was doing were cheap relative to the html5ever parse ahead of it, not because there was nothing to measure. Before this pass's fix (fusing sanitize and HTML-escaping into one pass over the output buffer, and dropping the per-run temporary `String`s and per-heading/link `format!` calls — see `core/html.rs`): 3.08 ms on Demographics of the United States (2.17 MB of source HTML, the largest article in this collection) and 1.13 ms on Albert Einstein. After: 0.46 ms and 0.34 ms (medians over 30 runs), an 85% and 70% reduction, verified byte-identical against the pre-fix renderer over 498 real articles. A revisit to an already-rendered article now costs about 0.2 ms instead of a full parse and render, via the LRU cache added in the same pass; the `GET /wiki/{path}` row above is the cache-miss cost a first visit pays.
-
-`ok mcp`'s tools cost the same `Library` calls with no HTTP parsing at all. `read` on Albert Einstein (68 sections) now returns 6,176 bytes (about 1,530 tokens, chars÷4) — down from 8,580 bytes before this pass trimmed the default outline to top-level sections only (each noting how many subsections it hides). `search "general relativity"` returns 1,172 bytes for 8 hits; `read` on one section of Albert Einstein ("Life and career", the largest) returns 6,115 bytes; `links` on that same section returns 2,250 bytes for 136 unique articles.
-
-The dependency cost of `axum` + `tokio` + `rmcp` (v1 used none of these; see `Cargo.toml`): the release binary is 16 MB (10 MB before them; 14 MB before this pass's `hyper-util` and `tower`'s `limit` feature, added for the header-read timeout and concurrency cap). A clean `cargo build --release -p ok` that has to compile the dependency graph for the first time takes about 75 s wall clock (roughly 35 s of that is axum/tokio/hyper/tower; rmcp/schemars/uuid add the rest) versus 23 s for `ok-core`/`ok` alone once every third-party dependency is already built.
-
-Inside Apple's `container` (1.3.1, default 4 CPUs and 1 GB, ZIM on a virtiofs bind mount, host cache warm), an earlier run (before `serve`/`mcp` existed) stayed within a few milliseconds of native: suggestions p99 20 ms, article loads p99 21 ms, link follows p99 29 ms, searches p99 3.5 ms for a title word and 11 ms for a common one, and 29 ms to open the library. Not re-measured for the HTTP/MCP paths yet.
-
-The slow end of suggestions is one- and two-letter prefixes, which scan tens of thousands of titles. Precomputing those is the obvious next step if it ever shows in use.
-
 ## How It Works
 
 `crates/zim` reads ZIM files without libzim. It memory-maps the file, parses directory entries in place, hands out uncompressed blobs as slices of the mapping, and decompresses zstd or xz clusters exactly as far as their offset tables say. Every size the file declares is checked and capped, because a ZIM file is input from the internet. A sampled comparison over 7,086 entries matches libzim byte for byte.
 
-`crates/core` imports a file once. It finds the real articles, turns mwoffliner's meta-refresh pages (171,945 section redirects in this file) into a lookup table, parses every article, counts inbound links, and writes an FST of titles ranked by those counts plus a Tantivy full-text index. Articles reach every interface as a structured document of sections, paragraphs, lists, facts and resolved links, never as HTML — except `ok-core::html`, which is the one place that turns that document back into HTML for `ok serve`, escaping every text run and allowlisting external link schemes, since ZIM content is untrusted.
+`crates/core` imports a file once. It finds the real articles, turns mwoffliner's meta-refresh pages (171,945 section redirects in this file) into a lookup table, parses every article, counts inbound links, and writes the title FST and the Tantivy index. Articles reach every interface as a structured document of sections, paragraphs, lists, facts and resolved links, never as HTML. The exception is `ok-core::html`, the one place that turns that document back into HTML for `ok serve`, escaping every text run and allowlisting external link schemes, since ZIM content is untrusted.
 
-`crates/cli` is the `ok` binary: the ratatui reader (default), `ok serve` (an `axum` web UI matching the reader's UX, heavy `Library` calls in `spawn_blocking`), and `ok mcp` (three tools — `search`, `read`, `links` — over stdio via the official `rmcp` SDK, identifiers always titles or paths, never entry indices). Only `serve`, `mcp` and `bench --http` construct a tokio runtime; every other subcommand, including the default TUI, pays no async startup cost.
+`crates/cli` is the `ok` binary: the ratatui reader (default), `ok serve` (an `axum` web UI matching the reader's UX, heavy `Library` calls in `spawn_blocking`), and `ok mcp` (three tools, `search`, `read` and `links`, over stdio via the official `rmcp` SDK).
 
 ## Tests
 
