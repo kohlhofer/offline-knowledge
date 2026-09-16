@@ -74,7 +74,10 @@ fn opening_without_import_says_what_to_do() {
     std::fs::write(&zim, wiki()).unwrap();
     let err = Library::open(&zim).err().expect("not imported");
     assert!(matches!(err, Error::NotImported(_)));
-    assert!(err.to_string().contains("ok import"));
+    // `--zim` is a global flag, not a subcommand argument: the old message
+    // ("run `ok import {zim}`") named an invocation that doesn't parse.
+    let message = err.to_string();
+    assert!(message.contains(&format!("run `ok --zim {} import`", zim.display())), "{message}");
 }
 
 #[test]
