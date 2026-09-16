@@ -125,10 +125,13 @@ fn search_empty_query_is_an_error() {
 }
 
 #[test]
-fn search_header_names_the_next_step_or_the_truncation() {
-    assert_eq!(tools::search_header(0, 0, "zzz"), "0 shown for \"zzz\" — try different words, or fewer of them");
-    assert_eq!(tools::search_header(3, 3, "x"), "3 shown for \"x\"");
-    assert_eq!(tools::search_header(2, 5, "x"), "2 shown of 5 for \"x\"");
+fn search_header_names_the_next_step_or_that_more_may_exist() {
+    assert_eq!(tools::search_header(0, 5, "zzz"), "0 shown for \"zzz\" — try different words, or fewer of them");
+    // Under the cap: no total is claimed, truncated or not.
+    assert_eq!(tools::search_header(2, 5, "x"), "2 shown for \"x\"");
+    // At the cap: never a specific total (neither query result is a real
+    // corpus count), just an honest "more may exist" either way.
+    assert_eq!(tools::search_header(5, 5, "x"), "5 shown for \"x\" — more may exist, call search again with a higher limit");
 }
 
 #[test]
@@ -141,6 +144,10 @@ fn search_skips_fulltext_when_title_hits_already_fill_the_limit() {
     let text = tools::search_text(&library, "einstein", 1).unwrap();
     assert!(text.contains("Albert Einstein"), "{text}");
     assert_eq!(text.lines().count(), 2, "header plus exactly one result: {text}");
+    // Title hits alone filling the limit used to mean "no truncation" (the
+    // fake total was the same as the shown count) — there's no way to know
+    // whether more titles existed beyond the cap, so this warns regardless.
+    assert!(text.contains("more may exist"), "{text}");
 }
 
 #[test]
@@ -195,6 +202,37 @@ fn read_section_outline_keyword_returns_the_full_outline() {
     let (_d, library) = imported();
     let text = tools::read_text(&library, "Albert Einstein", Some("outline"), None).unwrap();
     assert!(text.contains("2    Early life ("), "the full outline lists every section, nested ones included: {text}");
+}
+
+/// A real heading named "Outline" must win over the `section="outline"`
+/// keyword, and `read` and `links` must agree on that — before, `read`
+/// always took the keyword's full-outline dump instead, disagreeing with
+/// `links`, which already resolved the real heading correctly.
+#[test]
+fn read_section_a_real_outline_heading_wins_over_the_keyword() {
+    let (_d, library) = library_with(
+        ZimBuilder::new()
+            .article(
+                "Lobotomy",
+                "Lobotomy",
+                &page(
+                    "Lobotomy",
+                    r#"<p>A once-common neurosurgical procedure.</p>
+                    <div class="mw-heading mw-heading2"><h2 id="Outline">Outline</h2></div>
+                    <p>Steps of the procedure include <a href="Trepanning">trepanning</a>.</p>"#,
+                ),
+            )
+            .article("Trepanning", "Trepanning", &page("Trepanning", "<p>Drilling into the skull.</p>"))
+            .metadata("Title", "Tiny wiki")
+            .build(),
+    );
+
+    let text = tools::read_text(&library, "Lobotomy", Some("outline"), None).unwrap();
+    assert!(text.contains("Steps of the procedure"), "the real \"Outline\" section's own text, not the synthetic outline dump: {text}");
+    assert!(!text.contains("chars · "), "not the full-outline-dump header shape: {text}");
+
+    let links = tools::links_text(&library, "Lobotomy", Some("outline")).unwrap();
+    assert!(links.contains("Trepanning"), "links must resolve the same real heading read did: {links}");
 }
 
 #[test]

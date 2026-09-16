@@ -72,21 +72,28 @@ pub fn search_text(library: &Library, query: &str, limit: usize) -> Result<Strin
         }
     }
 
-    let total = lines.len();
     lines.truncate(limit);
-    let header = search_header(lines.len(), total, query);
+    let header = search_header(lines.len(), limit, query);
     Ok(std::iter::once(header).chain(lines).collect::<Vec<_>>().join("\n"))
 }
 
-/// `shown` is `total` after truncating to the caller's `limit`. A zero-hit
-/// search names a next step, same as every other failure path (N12); a
-/// truncated one says so, so an agent doesn't mistake a partial list for
-/// all of it (N23).
-pub(super) fn search_header(shown: usize, total: usize, query: &str) -> String {
+/// The old "N shown of M" total was the sum of two independently
+/// limit-capped queries, not a corpus count — `search("Einstein", limit=20)`
+/// could say "20 shown of 21" while hundreds more existed, and when title
+/// hits alone already filled `limit` (skipping the full-text query
+/// entirely), `total == shown` and the truncation hint never fired at all,
+/// even though there was no way to know whether more titles existed beyond
+/// the cap. Neither query result is ever a real total, so this never shows
+/// one: `shown == limit` warns that more may exist, honest either way.
+///
+/// A zero-hit search names a next step, same as every other failure path
+/// (N12); a possibly-truncated one says so, so an agent doesn't mistake a
+/// capped list for all of it (N23).
+pub(super) fn search_header(shown: usize, limit: usize, query: &str) -> String {
     if shown == 0 {
         format!("0 shown for \"{}\" — try different words, or fewer of them", sanitize(query))
-    } else if total > shown {
-        format!("{shown} shown of {total} for \"{}\"", sanitize(query))
+    } else if shown == limit {
+        format!("{shown} shown for \"{}\" — more may exist, call search again with a higher limit", sanitize(query))
     } else {
         format!("{shown} shown for \"{}\"", sanitize(query))
     }
@@ -100,13 +107,14 @@ pub(super) fn search_header(shown: usize, total: usize, query: &str) -> String {
 /// section-redirect's fragment is always resolved as an anchor id or
 /// heading, never reinterpreted as an index; when that resolution fails,
 /// `read` falls back to the overview rather than erroring, since the
-/// caller asked for the article, not a specific section.
+/// caller asked for the article, not a specific section. A real heading
+/// named "Outline" always wins over the `section="outline"` keyword — tried
+/// first, same as any other heading — so `read` and `links` agree on what
+/// that argument means, and the keyword only ever shadows a section no
+/// article actually has.
 pub fn read_text(library: &Library, article: &str, section: Option<&str>, offset: Option<usize>) -> Result<String, String> {
     let target = resolve_article(library, article)?;
     let doc = library.article(target.entry).map_err(|e| lookup_error(article, e))?;
-    if section.is_some_and(|s| s.eq_ignore_ascii_case("outline")) {
-        return Ok(full_outline_text(&doc));
-    }
     let (spec, from_redirect) = match section {
         Some(s) => (Some(s), false),
         None => (target.fragment.as_deref(), true),
@@ -115,6 +123,7 @@ pub fn read_text(library: &Library, article: &str, section: Option<&str>, offset
         None => Ok(read_overview(&doc)),
         Some(spec) => match resolve_section(&doc, spec, !from_redirect) {
             Some(index) => read_section(&doc, index, offset.unwrap_or(0)),
+            None if !from_redirect && spec.eq_ignore_ascii_case("outline") => Ok(full_outline_text(&doc)),
             None if from_redirect => Ok(read_overview(&doc)),
             None => Err(unresolvable_section_message(&doc, spec)),
         },
