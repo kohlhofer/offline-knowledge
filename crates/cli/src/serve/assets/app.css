@@ -320,8 +320,10 @@ article .external {
 /* A "References"/"Further reading" list repeats this marker once per
    entry — dozens of times on a well-cited article. The list context
    already says "these are external", so it's kept for a prose link and
-   dropped inside a list one. */
-article li .external {
+   dropped inside a list one. `span.external` is the marker only: the
+   link itself is `a.link.external`, which also carries the bare
+   `.external` class and must stay visible — round1 finding E-B1. */
+article li span.external {
   display: none;
 }
 

@@ -27,7 +27,8 @@ fn library() -> (tempfile::TempDir, Library) {
                 <p>A <a href="Physicist">physicist</a> who knew <a href="Nowhere">nobody here</a> and cited
                 <a href="https://example.org/x">a source</a>.</p>
                 <div class="mw-heading mw-heading2"><h2 id="Life">Life</h2></div>
-                <p>Born in Ulm.</p>"##,
+                <p>Born in Ulm.</p>
+                <ul><li>See (<a href="https://example.org/further">a further reading link</a>)</li></ul>"##,
             ),
         )
         .article("Physicist", "Physicist", &page("Physicist", "<p>Studies physics, like Einstein.</p>"))
@@ -234,6 +235,27 @@ async fn wiki_article_link_safety_missing_is_real_link_external_has_marker_and_n
         "{body}"
     );
     assert!(!body.contains("target="), "external links open in the same tab: {body}");
+}
+
+#[tokio::test]
+async fn wiki_external_link_text_in_a_list_item_stays_visible() {
+    // E-B1: `article li .external { display: none }` matched both the "↗ domain"
+    // marker span and `a.link.external` itself (which also carries the bare
+    // `.external` class), hiding the link text of every external link in a list.
+    let (_d, app) = app();
+    let body = body_text(get(&app, "/wiki/Albert_Einstein").await).await;
+    assert!(
+        body.contains("<a class=\"link external\" href=\"https://example.org/further\" rel=\"noreferrer\">a further reading link</a>"),
+        "external link text must stay visible inside a list item: {body}"
+    );
+}
+
+#[tokio::test]
+async fn static_app_css_hides_only_the_external_marker_span() {
+    let (_d, app) = app();
+    let css = body_text(get(&app, "/static/app.css").await).await;
+    assert!(css.contains("article li span.external"), "the marker-only selector must be present: {css}");
+    assert!(!css.contains("article li .external"), "the old selector also matched a.link.external: {css}");
 }
 
 #[tokio::test]
