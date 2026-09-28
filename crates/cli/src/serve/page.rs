@@ -130,7 +130,7 @@ pub fn search_body(query: &str, rows: &[SearchRow]) -> String {
         .map(|r| {
             format!(
                 r#"<li><a class="result" href="{href}"><span class="title">{title}</span><span class="summary">{summary}</span></a></li>"#,
-                href = esc(&ok_core::html::wiki_href(&r.path, None)),
+                href = esc(&ok_core::html::article_href(super::WIKI_BASE, &r.path, None)),
                 title = esc(&r.title),
                 summary = esc(&r.summary),
             )
@@ -178,7 +178,7 @@ pub fn not_found_body(requested_path: &str, suggestions: &[SuggestionRow], fallb
     } else {
         let items: String = suggestions
             .iter()
-            .map(|s| format!(r#"<li><a href="{href}">{title}</a></li>"#, href = esc(&ok_core::html::wiki_href(&s.path, None)), title = esc(&s.title)))
+            .map(|s| format!(r#"<li><a href="{href}">{title}</a></li>"#, href = esc(&ok_core::html::article_href(super::WIKI_BASE, &s.path, None)), title = esc(&s.title)))
             .collect();
         let lead = match fallback_prefix {
             Some(prefix) => format!("Titles starting with \"{}\":", esc(&prefix.replace('_', " "))),

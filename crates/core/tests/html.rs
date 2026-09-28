@@ -19,6 +19,9 @@ fn section(level: u8, heading: &str, blocks: Vec<Block>) -> Section {
     Section { level, heading: heading.into(), anchor: Some(heading.replace(' ', "_")), blocks }
 }
 
+/// The single-collection route prefix `ok serve` renders with today.
+const WIKI: &str = "/wiki";
+
 fn paths(entry: u32) -> Option<String> {
     (entry == 2).then(|| "Other_Article".to_string())
 }
@@ -37,7 +40,7 @@ fn each_block_variant_renders_its_expected_tag() {
             Block::Code { text: "fn main() {}".into() },
         ],
     )]);
-    let html = d.to_html(&paths);
+    let html = d.to_html(WIKI, &paths);
     assert!(html.contains("<p>a paragraph</p>"), "{html}");
     assert!(html.contains("<blockquote><p>a quote</p></blockquote>"), "{html}");
     assert!(html.contains("<p class=\"hatnote\">see also</p>"), "{html}");
@@ -49,7 +52,7 @@ fn each_block_variant_renders_its_expected_tag() {
 #[test]
 fn script_tag_text_is_escaped_not_executed() {
     let d = doc(vec![section(1, "Article", vec![Block::Paragraph { content: vec![text("<script>alert(1)</script>")] }])]);
-    let html = d.to_html(&paths);
+    let html = d.to_html(WIKI, &paths);
     assert!(!html.contains("<script>"), "{html}");
     assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"), "{html}");
 }
@@ -61,7 +64,7 @@ fn missing_link_is_a_real_anchor_not_an_inert_span() {
         "Article",
         vec![Block::Paragraph { content: vec![linked("gone", Link::Missing { path: "Gone_Page".into() })] }],
     )]);
-    let html = d.to_html(&paths);
+    let html = d.to_html(WIKI, &paths);
     assert!(html.contains("<a class=\"link missing\" href=\"/wiki/Gone_Page\">gone</a>"), "{html}");
     assert!(!html.contains("<span"), "no inert span for a missing link: {html}");
 }
@@ -73,7 +76,7 @@ fn allowlisted_external_link_is_a_real_anchor_with_noreferrer_and_no_target() {
         "Article",
         vec![Block::Paragraph { content: vec![linked("site", Link::External { url: "https://example.org/x".into() })] }],
     )]);
-    let html = d.to_html(&paths);
+    let html = d.to_html(WIKI, &paths);
     assert!(html.contains("<a class=\"link external\" href=\"https://example.org/x\" rel=\"noreferrer\">site</a>"), "{html}");
     assert!(!html.contains("target="), "{html}");
     assert!(html.contains("example.org"), "the domain is shown next to the link: {html}");
@@ -86,7 +89,7 @@ fn external_link_href_and_domain_marker_are_sanitized() {
         "Article",
         vec![Block::Paragraph { content: vec![linked("site", Link::External { url: "https://exa\u{7}mple.org/x".into() })] }],
     )]);
-    let html = d.to_html(&paths);
+    let html = d.to_html(WIKI, &paths);
     assert!(html.contains("<a class=\"link external\" href=\"https://example.org/x\" rel=\"noreferrer\">site</a>"), "{html}");
     assert!(!html.contains('\u{7}'), "the BEL control character must not reach the response: {html}");
     assert!(html.contains("example.org"), "{html}");
@@ -99,7 +102,7 @@ fn javascript_scheme_link_renders_inert() {
         "Article",
         vec![Block::Paragraph { content: vec![linked("click", Link::External { url: "javascript:alert(1)".into() })] }],
     )]);
-    let html = d.to_html(&paths);
+    let html = d.to_html(WIKI, &paths);
     assert!(!html.contains("<a"), "{html}");
     assert!(html.contains("click"), "the text still shows, just not as a link: {html}");
 }
@@ -108,7 +111,7 @@ fn javascript_scheme_link_renders_inert() {
 fn unsafe_schemes_render_inert_including_mixed_case_and_leading_whitespace() {
     for url in ["data:text/html,<script>alert(1)</script>", "vbscript:msgbox(1)", "JavaScript:alert(1)", " javascript:alert(1)"] {
         let d = doc(vec![section(1, "Article", vec![Block::Paragraph { content: vec![linked("x", Link::External { url: url.into() })] }])]);
-        let html = d.to_html(&paths);
+        let html = d.to_html(WIKI, &paths);
         assert!(!html.contains("<a"), "{url} must render inert: {html}");
     }
 }
@@ -120,7 +123,7 @@ fn allowlisted_scheme_check_is_case_insensitive() {
         "Article",
         vec![Block::Paragraph { content: vec![linked("site", Link::External { url: "HTTPS://example.org/x".into() })] }],
     )]);
-    let html = d.to_html(&paths);
+    let html = d.to_html(WIKI, &paths);
     assert!(html.contains("<a class=\"link external\""), "an allowed scheme in upper case must still render as a real link: {html}");
 }
 
@@ -137,7 +140,7 @@ fn non_web_uri_scheme_link_renders_inert_not_a_missing_article_link() {
         "Article",
         vec![Block::Paragraph { content: vec![linked("Berlin", Link::External { url: "geo:52.5,13.4".into() })] }],
     )]);
-    let html = d.to_html(&paths);
+    let html = d.to_html(WIKI, &paths);
     assert!(!html.contains("<a"), "{html}");
     assert!(!html.contains("link missing"), "{html}");
     assert!(html.contains("Berlin"), "the text still shows, just not as a link: {html}");
@@ -159,7 +162,7 @@ fn adjacent_runs_sharing_an_article_link_merge_into_one_anchor() {
             ],
         }],
     )]);
-    let html = d.to_html(&paths);
+    let html = d.to_html(WIKI, &paths);
     assert_eq!(html.matches("<a ").count(), 1, "one anchor for the whole run, not one per style change: {html}");
     assert!(html.contains("<a class=\"link article\" href=\"/wiki/Other_Article\"><em>E</em> = <em>mc</em></a>"), "{html}");
 }
@@ -178,7 +181,7 @@ fn adjacent_runs_sharing_an_external_link_get_one_domain_marker() {
             ],
         }],
     )]);
-    let html = d.to_html(&paths);
+    let html = d.to_html(WIKI, &paths);
     assert_eq!(html.matches("<a ").count(), 1, "one anchor for the whole run: {html}");
     assert_eq!(html.matches('↗').count(), 1, "one domain marker for the whole run, not one per source run: {html}");
     assert!(html.contains("<a class=\"link external\" href=\"https://example.org/x\" rel=\"noreferrer\">Example Site</a>"), "{html}");
@@ -199,7 +202,7 @@ fn different_adjacent_links_do_not_merge() {
             ],
         }],
     )]);
-    let html = d.to_html(&paths);
+    let html = d.to_html(WIKI, &paths);
     assert_eq!(html.matches("<a").count(), 2, "two distinct links must not merge into one: {html}");
 }
 
@@ -210,7 +213,7 @@ fn article_link_resolves_through_the_paths_closure_with_fragment() {
         "Article",
         vec![Block::Paragraph { content: vec![linked("other", Link::Article { entry: 2, fragment: Some("Life".into()) })] }],
     )]);
-    let html = d.to_html(&paths);
+    let html = d.to_html(WIKI, &paths);
     assert!(html.contains("<a class=\"link article\" href=\"/wiki/Other_Article#Life\">other</a>"), "{html}");
 }
 
@@ -221,7 +224,7 @@ fn article_link_whose_path_lookup_fails_renders_as_missing_not_silently_as_plain
         "Article",
         vec![Block::Paragraph { content: vec![linked("gone", Link::Article { entry: 99, fragment: None })] }],
     )]);
-    let html = d.to_html(&paths);
+    let html = d.to_html(WIKI, &paths);
     assert!(html.contains("<span class=\"link missing\">gone</span>"), "{html}");
     assert!(!html.contains("<a"), "no real link when the path lookup failed: {html}");
 }
@@ -238,7 +241,7 @@ fn lead_section_puts_the_first_paragraph_before_the_infobox_aside() {
             Block::Paragraph { content: vec![text("a second paragraph")] },
         ],
     )]);
-    let html = d.to_html(&paths);
+    let html = d.to_html(WIKI, &paths);
     let lead_para = html.find("the lead paragraph").unwrap();
     let aside_open = html.find("<aside class=\"infobox\">").unwrap();
     let aside_close = html.find("</aside>").unwrap();
@@ -262,7 +265,7 @@ fn lead_section_puts_the_first_paragraph_before_the_infobox_aside() {
 #[test]
 fn heading_anchor_containing_a_quote_is_escaped_in_the_id_attribute() {
     let d = doc(vec![section(2, "Definition of \"racial discrimination\"", vec![])]);
-    let html = d.to_html(&paths);
+    let html = d.to_html(WIKI, &paths);
     assert!(
         html.contains("<h2 id=\"Definition_of_&quot;racial_discrimination&quot;\" data-path=\"Definition of &quot;racial discrimination&quot;\">"),
         "{html}"
@@ -321,7 +324,7 @@ fn to_html_output_is_byte_identical_over_a_fixture_touching_every_kind() {
         ),
         section(2, "Sub \"heading\"", vec![Block::Paragraph { content: vec![text("nested")] }]),
     ]);
-    let html = d.to_html(&paths);
+    let html = d.to_html(WIKI, &paths);
     assert_eq!(
         html,
         "<h1 id=\"Article\" data-path=\"Article\">Article</h1><p><strong><em>Bold and italic</em></strong> plain \
@@ -344,7 +347,7 @@ fn heading_carries_an_id_and_a_data_path_breadcrumb() {
     // falls back to a slugified heading.
     let lead = Section { level: 1, heading: "Albert Einstein".into(), anchor: None, blocks: vec![] };
     let d = doc(vec![lead, section(2, "Life and career", vec![]), section(3, "Early life", vec![])]);
-    let html = d.to_html(&paths);
+    let html = d.to_html(WIKI, &paths);
     assert!(html.contains("<h1 id=\"Albert_Einstein\" data-path=\"Albert Einstein\">Albert Einstein</h1>"), "{html}");
     assert!(
         html.contains("<h2 id=\"Life_and_career\" data-path=\"Life and career\">Life and career</h2>"),
@@ -354,4 +357,30 @@ fn heading_carries_an_id_and_a_data_path_breadcrumb() {
         html.contains("<h3 id=\"Early_life\" data-path=\"Life and career › Early life\">Early life</h3>"),
         "{html}"
     );
+}
+
+/// Every article link in a rendered page hangs off the base it was rendered
+/// with, so a page from one collection never links into another. Anchors
+/// and external links are not article links and are untouched.
+#[test]
+fn a_rendered_article_takes_all_its_article_hrefs_from_the_base() {
+    let d = doc(vec![section(
+        1,
+        "Article",
+        vec![Block::Paragraph {
+            content: vec![
+                linked("known", Link::Article { entry: 2, fragment: Some("Life".into()) }),
+                linked("gone", Link::Missing { path: "Gone_Page".into() }),
+                linked("here", Link::Anchor { fragment: "Sec".into() }),
+                linked("out", Link::External { url: "https://example.org/x".into() }),
+            ],
+        }],
+    )]);
+
+    let html = d.to_html("/wiktionary", &paths);
+    assert!(html.contains("href=\"/wiktionary/Other_Article#Life\""), "{html}");
+    assert!(html.contains("href=\"/wiktionary/Gone_Page\""), "a missing link stays inside the collection too: {html}");
+    assert!(!html.contains("/wiki/"), "nothing may fall back to the single-collection prefix: {html}");
+    assert!(html.contains("href=\"#Sec\""), "an in-page anchor takes no base: {html}");
+    assert!(html.contains("href=\"https://example.org/x\""), "an external link takes no base: {html}");
 }

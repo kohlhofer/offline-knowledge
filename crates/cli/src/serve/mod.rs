@@ -33,6 +33,11 @@ use tower::limit::ConcurrencyLimitLayer;
 /// mid-request on — open forever. `axum::serve` leaves this unset.
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The path prefix every article link in a rendered page hangs off,
+/// matching the `/wiki/{*path}` route below. Per-collection routes replace
+/// it with the active collection's own prefix.
+pub(crate) const WIKI_BASE: &str = "/wiki";
+
 /// A ceiling well above any legitimate browser's concurrency and well below
 /// the flood level that pushed RSS from 62 to 151 MB in testing: the one
 /// control this unauthenticated, unrate-limited server has on memory use.

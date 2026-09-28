@@ -212,7 +212,7 @@ fn render_article(library: &Library, cache: &ArticleCache, path: &str) -> ok_cor
                 // the target page can say "Redirected from X" (N13): landing
                 // mid-article, on a differently titled page, with no
                 // indication of how the reader got there otherwise.
-                let location = ok_core::html::wiki_href_redirected_from(&canonical, target.fragment.as_deref(), path);
+                let location = ok_core::html::article_href_redirected_from(super::WIKI_BASE, &canonical, target.fragment.as_deref(), path);
                 return Ok(ArticleOutcome::Redirect { location });
             }
             if let Some(cached) = cache.get(target.entry) {
@@ -220,7 +220,7 @@ fn render_article(library: &Library, cache: &ArticleCache, path: &str) -> ok_cor
             }
             match library.article(target.entry) {
                 Ok(doc) => {
-                    let html = doc.to_html(&|entry| library.path(entry).ok());
+                    let html = doc.to_html(super::WIKI_BASE, &|entry| library.path(entry).ok());
                     let cached = cache.insert(target.entry, CachedArticle { title: doc.title, html });
                     return Ok(ArticleOutcome::Found { title: cached.title.clone(), html: cached.html.clone() });
                 }
@@ -281,7 +281,7 @@ pub async fn random(State(library): State<Arc<Library>>) -> Response {
     match library.random_article(seed).and_then(|entry| library.path(entry).ok()) {
         Some(path) => (
             StatusCode::FOUND,
-            [(header::LOCATION, ok_core::html::wiki_href(&path, None)), (header::CACHE_CONTROL, "no-store".to_string())],
+            [(header::LOCATION, ok_core::html::article_href(super::WIKI_BASE, &path, None)), (header::CACHE_CONTROL, "no-store".to_string())],
         )
             .into_response(),
         None => server_error_html("this collection has no articles"),

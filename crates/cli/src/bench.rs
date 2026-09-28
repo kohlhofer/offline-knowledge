@@ -140,7 +140,7 @@ fn http_bench(library: Arc<Library>, samples: usize) -> Result<Vec<Duration>> {
         for _ in 0..samples {
             let entry = library.random_article(rng.next()).expect("library has articles");
             let path = library.path(entry)?;
-            let uri = ok_core::html::wiki_href(&path, None);
+            let uri = ok_core::html::article_href(crate::serve::WIKI_BASE, &path, None);
             let started = Instant::now();
             let response = http_get(addr, &uri).await?;
             ensure!(

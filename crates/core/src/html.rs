@@ -2,9 +2,12 @@
 //! text run is escaped, every link is classified before it becomes an
 //! `<a>`, and the lead section's infobox is pulled out into an `<aside>`.
 //!
-//! `paths` maps an article entry to its `/wiki/{path}` path (about 1 µs per
-//! lookup); it is a closure rather than a `&Library` so this module stays
-//! free of any dependency on how a caller stores articles.
+//! `paths` maps an article entry to its path (about 1 µs per lookup); it is
+//! a closure rather than a `&Library` so this module stays free of any
+//! dependency on how a caller stores articles. `base` is the path prefix
+//! those links hang off — one collection's `/wikipedia`, or `/wiki` for the
+//! single-collection route — so a rendered article never links out of the
+//! collection it came from.
 //!
 //! Every text run is sanitized and escaped in one pass via [`esc_into`],
 //! writing straight into the output buffer: measured 3.08 ms down to
@@ -29,15 +32,15 @@ impl Document {
     /// The article as HTML: one heading element per section (carrying an
     /// `id` and a `data-path` breadcrumb) followed by its blocks, with the
     /// lead section's infobox pulled into a floated `<aside>`.
-    pub fn to_html(&self, paths: &dyn Fn(u32) -> Option<String>) -> String {
+    pub fn to_html(&self, base: &str, paths: &dyn Fn(u32) -> Option<String>) -> String {
         let mut out = String::with_capacity(estimate_html_len(&self.sections));
         for (index, section) in self.sections.iter().enumerate() {
             render_heading(&mut out, &self.sections, index);
             if index == 0 {
-                render_lead_blocks(&mut out, &section.blocks, paths);
+                render_lead_blocks(&mut out, &section.blocks, base, paths);
             } else {
                 for block in &section.blocks {
-                    render_block(&mut out, block, paths);
+                    render_block(&mut out, block, base, paths);
                 }
             }
         }
@@ -122,44 +125,44 @@ fn slugify(heading: &str) -> String {
 /// The lead section: the first paragraph, then any facts as a floated
 /// infobox, then the rest of the section in original order. Every other
 /// section renders in document order (see `to_html`).
-fn render_lead_blocks(out: &mut String, blocks: &[Block], paths: &dyn Fn(u32) -> Option<String>) {
+fn render_lead_blocks(out: &mut String, blocks: &[Block], base: &str, paths: &dyn Fn(u32) -> Option<String>) {
     let first_paragraph = blocks.iter().position(|b| matches!(b, Block::Paragraph { .. }));
     if let Some(i) = first_paragraph {
-        render_block(out, &blocks[i], paths);
+        render_block(out, &blocks[i], base, paths);
     }
     for block in blocks.iter().filter(|b| matches!(b, Block::Facts { .. })) {
         out.push_str("<aside class=\"infobox\">");
-        render_block(out, block, paths);
+        render_block(out, block, base, paths);
         out.push_str("</aside>");
     }
     for (i, block) in blocks.iter().enumerate() {
         if Some(i) == first_paragraph || matches!(block, Block::Facts { .. }) {
             continue;
         }
-        render_block(out, block, paths);
+        render_block(out, block, base, paths);
     }
 }
 
-fn render_block(out: &mut String, block: &Block, paths: &dyn Fn(u32) -> Option<String>) {
+fn render_block(out: &mut String, block: &Block, base: &str, paths: &dyn Fn(u32) -> Option<String>) {
     match block {
         Block::Paragraph { content } => {
             out.push_str("<p>");
-            render_inlines(out, content, paths);
+            render_inlines(out, content, base, paths);
             out.push_str("</p>");
         }
         Block::Quote { content } => {
             out.push_str("<blockquote><p>");
-            render_inlines(out, content, paths);
+            render_inlines(out, content, base, paths);
             out.push_str("</p></blockquote>");
         }
         Block::Note { content } => {
             out.push_str("<p class=\"hatnote\">");
-            render_inlines(out, content, paths);
+            render_inlines(out, content, base, paths);
             out.push_str("</p>");
         }
-        Block::List { ordered, items } => render_list(out, *ordered, items, paths),
-        Block::Facts { facts } => render_facts(out, facts, paths),
-        Block::Table { rows } => render_table(out, rows, paths),
+        Block::List { ordered, items } => render_list(out, *ordered, items, base, paths),
+        Block::Facts { facts } => render_facts(out, facts, base, paths),
+        Block::Table { rows } => render_table(out, rows, base, paths),
         Block::Code { text } => {
             out.push_str("<pre><code>");
             esc_into(out, text);
@@ -172,7 +175,7 @@ fn render_block(out: &mut String, block: &Block, paths: &dyn Fn(u32) -> Option<S
 /// document model only ever increases depth by one level at a time (the
 /// parser's list/definition-list recursion always does), so a deeper jump
 /// in one step is not handled specially.
-fn render_list(out: &mut String, ordered: bool, items: &[ListItem], paths: &dyn Fn(u32) -> Option<String>) {
+fn render_list(out: &mut String, ordered: bool, items: &[ListItem], base: &str, paths: &dyn Fn(u32) -> Option<String>) {
     let (open_tag, close_tag) = if ordered { ("<ol>", "</ol>") } else { ("<ul>", "</ul>") };
     out.push_str(open_tag);
     let mut depth: u8 = 0;
@@ -193,7 +196,7 @@ fn render_list(out: &mut String, ordered: bool, items: &[ListItem], paths: &dyn 
         }
         depth = item.depth;
         out.push_str("<li>");
-        render_inlines(out, &item.content, paths);
+        render_inlines(out, &item.content, base, paths);
         first = false;
     }
     if !first {
@@ -208,7 +211,7 @@ fn render_list(out: &mut String, ordered: bool, items: &[ListItem], paths: &dyn 
 
 /// A fact with a value is a `label: value` row; one with an empty value is a
 /// heading inside the box; one with an empty label is a caption row.
-fn render_facts(out: &mut String, facts: &[Fact], paths: &dyn Fn(u32) -> Option<String>) {
+fn render_facts(out: &mut String, facts: &[Fact], base: &str, paths: &dyn Fn(u32) -> Option<String>) {
     out.push_str("<table class=\"facts\">");
     for fact in facts {
         out.push_str("<tr>");
@@ -220,14 +223,14 @@ fn render_facts(out: &mut String, facts: &[Fact], paths: &dyn Fn(u32) -> Option<
             }
             (true, false) => {
                 out.push_str("<td colspan=\"2\">");
-                render_inlines(out, &fact.value, paths);
+                render_inlines(out, &fact.value, base, paths);
                 out.push_str("</td>");
             }
             _ => {
                 out.push_str("<th>");
                 esc_into(out, &fact.label);
                 out.push_str("</th><td>");
-                render_inlines(out, &fact.value, paths);
+                render_inlines(out, &fact.value, base, paths);
                 out.push_str("</td>");
             }
         }
@@ -236,14 +239,14 @@ fn render_facts(out: &mut String, facts: &[Fact], paths: &dyn Fn(u32) -> Option<
     out.push_str("</table>");
 }
 
-fn render_table(out: &mut String, rows: &[Vec<Cell>], paths: &dyn Fn(u32) -> Option<String>) {
+fn render_table(out: &mut String, rows: &[Vec<Cell>], base: &str, paths: &dyn Fn(u32) -> Option<String>) {
     out.push_str("<table>");
     for row in rows {
         out.push_str("<tr>");
         for cell in row {
             let (open, close) = if cell.header { ("<th>", "</th>") } else { ("<td>", "</td>") };
             out.push_str(open);
-            render_inlines(out, &cell.content, paths);
+            render_inlines(out, &cell.content, base, paths);
             out.push_str(close);
         }
         out.push_str("</tr>");
@@ -257,18 +260,18 @@ fn render_table(out: &mut String, rows: &[Vec<Cell>], paths: &dyn Fn(u32) -> Opt
 /// is four `Inline`s (only "E" and "mc" are italic) but one logical link —
 /// four separate anchors means four Tab stops, four `n` presses and a
 /// repeated "↗ domain" marker for an external one.
-fn render_inlines(out: &mut String, content: &[Inline], paths: &dyn Fn(u32) -> Option<String>) {
+fn render_inlines(out: &mut String, content: &[Inline], base: &str, paths: &dyn Fn(u32) -> Option<String>) {
     let mut i = 0;
     while i < content.len() {
         let link = &content[i].link;
         let end = content[i + 1..].iter().take_while(|inline| &inline.link == link).count() + i + 1;
-        render_inline_group(out, &content[i..end], link.as_ref(), paths);
+        render_inline_group(out, &content[i..end], link.as_ref(), base, paths);
         i = end;
     }
 }
 
-fn render_inline_group(out: &mut String, group: &[Inline], link: Option<&Link>, paths: &dyn Fn(u32) -> Option<String>) {
-    let close = link.map(|l| render_link_open(out, l, paths));
+fn render_inline_group(out: &mut String, group: &[Inline], link: Option<&Link>, base: &str, paths: &dyn Fn(u32) -> Option<String>) {
+    let close = link.map(|l| render_link_open(out, l, base, paths));
     for inline in group {
         if inline.style.bold {
             out.push_str("<strong>");
@@ -317,12 +320,12 @@ enum LinkClose {
 /// Writes the opening tag for `link` (or nothing, for inert text) straight
 /// into `out`, returning what [`render_link_close`] should write once the
 /// run's styled, escaped text is in place.
-fn render_link_open(out: &mut String, link: &Link, paths: &dyn Fn(u32) -> Option<String>) -> LinkClose {
+fn render_link_open(out: &mut String, link: &Link, base: &str, paths: &dyn Fn(u32) -> Option<String>) -> LinkClose {
     match link {
         Link::Article { entry, fragment } => match paths(*entry) {
             Some(path) => {
                 out.push_str("<a class=\"link article\" href=\"");
-                push_wiki_href(out, &path, fragment.as_deref());
+                push_article_href(out, base, &path, fragment.as_deref());
                 out.push_str("\">");
                 LinkClose::Anchor
             }
@@ -337,7 +340,7 @@ fn render_link_open(out: &mut String, link: &Link, paths: &dyn Fn(u32) -> Option
         },
         Link::Missing { path } => {
             out.push_str("<a class=\"link missing\" href=\"");
-            push_wiki_href(out, path, None);
+            push_article_href(out, base, path, None);
             out.push_str("\">");
             LinkClose::Anchor
         }
@@ -395,8 +398,9 @@ fn push_encoded(out: &mut String, path: &str) {
     let _ = write!(out, "{}", utf8_percent_encode(path, PATH_SAFE));
 }
 
-fn push_wiki_href(out: &mut String, path: &str, fragment: Option<&str>) {
-    out.push_str("/wiki/");
+fn push_article_href(out: &mut String, base: &str, path: &str, fragment: Option<&str>) {
+    out.push_str(base);
+    out.push('/');
     push_encoded(out, path);
     if let Some(fragment) = fragment {
         out.push('#');
@@ -404,16 +408,19 @@ fn push_wiki_href(out: &mut String, path: &str, fragment: Option<&str>) {
     }
 }
 
-/// A percent-encoded `/wiki/{path}[#fragment]` href, the canonical URL for
+/// A percent-encoded `{base}/{path}[#fragment]` href, the canonical URL for
 /// an article. Shared by the article renderer above and `ok serve`'s route
-/// handlers, so there is exactly one place that knows how a path becomes a URL.
-pub fn wiki_href(path: &str, fragment: Option<&str>) -> String {
-    let mut out = String::with_capacity(path.len() + 8);
-    push_wiki_href(&mut out, path, fragment);
+/// handlers, so there is exactly one place that knows how a path becomes a
+/// URL. `base` is the collection's own path prefix with no trailing slash
+/// (`/wiki`, `/wikipedia`): it comes from a route constant or a validated
+/// label, never from a ZIM, and is written out as given.
+pub fn article_href(base: &str, path: &str, fragment: Option<&str>) -> String {
+    let mut out = String::with_capacity(base.len() + path.len() + 8);
+    push_article_href(&mut out, base, path, fragment);
     out
 }
 
-/// A percent-encoded `/wiki/{path}?redirected_from={redirected_from}[#fragment]`
+/// A percent-encoded `{base}/{path}?redirected_from={redirected_from}[#fragment]`
 /// href: `redirected_from` is the path originally requested, round-tripped
 /// through the query string so the target page can say "Redirected from X"
 /// without the server needing to remember anything about the request that
@@ -421,9 +428,10 @@ pub fn wiki_href(path: &str, fragment: Option<&str>) -> String {
 /// necessary) encoding for a query value too — `/` is the only reserved
 /// query character it leaves unescaped, and an unescaped `/` needs no
 /// escaping there.
-pub fn wiki_href_redirected_from(path: &str, fragment: Option<&str>, redirected_from: &str) -> String {
-    let mut out = String::with_capacity(path.len() + redirected_from.len() + 24);
-    out.push_str("/wiki/");
+pub fn article_href_redirected_from(base: &str, path: &str, fragment: Option<&str>, redirected_from: &str) -> String {
+    let mut out = String::with_capacity(base.len() + path.len() + redirected_from.len() + 24);
+    out.push_str(base);
+    out.push('/');
     push_encoded(&mut out, path);
     out.push_str("?redirected_from=");
     push_encoded(&mut out, redirected_from);
@@ -479,14 +487,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wiki_href_redirected_from_encodes_path_query_and_fragment() {
-        assert_eq!(wiki_href_redirected_from("Albert_Einstein", None, "Einstein"), "/wiki/Albert_Einstein?redirected_from=Einstein");
+    fn article_href_redirected_from_encodes_path_query_and_fragment() {
+        assert_eq!(article_href_redirected_from("/wiki", "Albert_Einstein", None, "Einstein"), "/wiki/Albert_Einstein?redirected_from=Einstein");
         assert_eq!(
-            wiki_href_redirected_from("Albert_Einstein", Some("Life"), "Einstein early life"),
+            article_href_redirected_from("/wiki", "Albert_Einstein", Some("Life"), "Einstein early life"),
             "/wiki/Albert_Einstein?redirected_from=Einstein%20early%20life#Life"
         );
         // A redirected-from value containing `&` or `=` must not be able to
         // inject a second query parameter.
-        assert_eq!(wiki_href_redirected_from("A", None, "a&b=c"), "/wiki/A?redirected_from=a%26b%3Dc");
+        assert_eq!(article_href_redirected_from("/wiki", "A", None, "a&b=c"), "/wiki/A?redirected_from=a%26b%3Dc");
+    }
+
+    /// The base is the whole prefix, so one collection's articles link only
+    /// into that collection.
+    #[test]
+    fn a_base_other_than_wiki_prefixes_every_article_href() {
+        assert_eq!(article_href("/wiktionary", "Mercury", None), "/wiktionary/Mercury");
+        assert_eq!(article_href("/wiktionary", "AC/DC", Some("Band")), "/wiktionary/AC/DC#Band");
+        assert_eq!(
+            article_href_redirected_from("/archlinux", "Pacman", None, "Package_manager"),
+            "/archlinux/Pacman?redirected_from=Package_manager"
+        );
     }
 }
