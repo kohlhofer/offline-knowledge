@@ -27,6 +27,16 @@ pub struct IndexMeta {
     pub zim_uuid: String,
     pub zim_bytes: u64,
     pub title: String,
+    /// The ZIM's `Name` metadata, which a collection's label is derived
+    /// from, and its `Scraper`, recorded here so loading a set of
+    /// collections touches no ZIM at all. Optional in both directions:
+    /// serde defaults them for an index built before they existed, and
+    /// bumping [`INDEX_FORMAT`] would have forced a re-import of every
+    /// file already imported, a 2.1 GB one included.
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub scraper: Option<String>,
     pub articles: usize,
     pub redirects: usize,
     pub section_redirects: usize,
@@ -71,12 +81,35 @@ pub fn index_dir_for(zim: &Path) -> PathBuf {
     zim.with_extension("okx")
 }
 
+impl IndexMeta {
+    /// Reads and version-checks a ZIM's index metadata. 337 bytes for the
+    /// Wikipedia index: the whole of what opening a collection costs, as
+    /// against the 9.7 ms [`crate::Library::open`] pays for the indexes
+    /// themselves.
+    pub fn read(zim: &Path) -> Result<IndexMeta> {
+        let path = index_dir_for(zim).join("meta.json");
+        if !path.exists() {
+            return Err(Error::NotImported(zim.to_path_buf()));
+        }
+        let meta: IndexMeta = serde_json::from_slice(&std::fs::read(path)?)?;
+        if meta.format != INDEX_FORMAT {
+            return Err(Error::IndexFormat { expected: INDEX_FORMAT, found: meta.format });
+        }
+        Ok(meta)
+    }
+}
+
 /// Location of an HTML entry: (cluster, blob, entry), sortable into cluster order.
 type Located = (u32, u32, u32);
 
 pub fn import(zim_path: &Path, options: &ImportOptions, progress: &(dyn Fn(Progress) + Sync)) -> Result<ImportReport> {
     let started = Instant::now();
     let archive = Archive::open(zim_path)?;
+    // Before any work: an import that runs for ninety seconds and then says
+    // "wrong scraper" wastes the ninety seconds.
+    let name = archive.metadata("Name")?;
+    let scraper = archive.metadata("Scraper")?;
+    crate::collections::check_scraper(zim_path, scraper.as_deref())?;
     let namespace = archive.article_namespace();
 
     // Every path in the article namespace, resolved through ZIM redirects, so
@@ -246,6 +279,8 @@ pub fn import(zim_path: &Path, options: &ImportOptions, progress: &(dyn Fn(Progr
         zim_uuid: archive.header().uuid_hex(),
         zim_bytes: archive.file_len(),
         title: archive.metadata("Title")?.unwrap_or_default(),
+        name,
+        scraper,
         articles: articles.len(),
         redirects: redirects.len(),
         section_redirects: stubs.len(),

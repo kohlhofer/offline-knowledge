@@ -40,6 +40,7 @@ fn library() -> (tempfile::TempDir, Library) {
         .redirect("Einstein", "Einstein", "Albert_Einstein")
         .resource("_res_/style.css", "text/css", b"p{}")
         .metadata("Title", "Tiny wiki")
+        .metadata("Scraper", "mwoffliner 1.17.5")
         .build();
     let dir = tempfile::tempdir().unwrap();
     let zim = dir.path().join("t.zim");

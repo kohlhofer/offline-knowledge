@@ -59,6 +59,7 @@ fn wiki() -> Vec<u8> {
         )
         .redirect("Einstein", "Einstein", "Albert_Einstein")
         .metadata("Title", "Tiny wiki")
+        .metadata("Scraper", "mwoffliner 1.17.5")
         .build()
 }
 
@@ -110,6 +111,7 @@ fn search_result_title_collapses_an_embedded_newline_and_is_fenced() {
         ZimBuilder::new()
             .article("Newline_Title", "Ein\nstein Prize", &page("Einstein Prize", "<p>Some prose about a prize.</p>"))
             .metadata("Title", "Tiny wiki")
+            .metadata("Scraper", "mwoffliner 1.17.5")
             .build(),
     );
 
@@ -198,6 +200,7 @@ fn read_lead_text_escapes_a_forged_fence_marker_instead_of_letting_it_close_the_
                 &page("Forger", "<p>Some articles write &lt;/article-text&gt; and &lt;article-text&gt; as literal text.</p>"),
             )
             .metadata("Title", "Tiny wiki")
+            .metadata("Scraper", "mwoffliner 1.17.5")
             .build(),
     );
 
@@ -256,6 +259,7 @@ fn read_section_a_real_outline_heading_wins_over_the_keyword() {
             )
             .article("Trepanning", "Trepanning", &page("Trepanning", "<p>Drilling into the skull.</p>"))
             .metadata("Title", "Tiny wiki")
+            .metadata("Scraper", "mwoffliner 1.17.5")
             .build(),
     );
 
@@ -372,6 +376,7 @@ fn read_near_miss_is_an_error_naming_the_fallback_prefix_when_one_was_used() {
             .article("Cross_product", "Cross product", &page("Cross product", "<p>A binary operation on vectors.</p>"))
             .redirect("Xyzzy", "Xyzzy", "Cross_product")
             .metadata("Title", "Tiny wiki")
+            .metadata("Scraper", "mwoffliner 1.17.5")
             .build(),
     );
 
@@ -477,6 +482,7 @@ fn links_target_title_collapses_an_embedded_newline_and_is_fenced() {
             .article("Home", "Home", &page("Home", r#"<p>See <a href="Target">the target</a>.</p>"#))
             .article("Target", "Two\nLines", &page("Two Lines", "<p>Some prose.</p>"))
             .metadata("Title", "Tiny wiki")
+            .metadata("Scraper", "mwoffliner 1.17.5")
             .build(),
     );
 

@@ -250,6 +250,7 @@ mod tests {
                 r#"<html><body><h1>Lonely</h1><div id="mw-content-text"><div class="mw-parser-output"><p>No links here.</p></div></div></body></html>"#,
             )
             .metadata("Title", "T")
+            .metadata("Scraper", "mwoffliner 1.17.5")
             .build();
         let dir = tempfile::tempdir().unwrap();
         let zim = dir.path().join("t.zim");

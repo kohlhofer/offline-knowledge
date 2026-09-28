@@ -68,6 +68,22 @@ impl TitleIndex {
         Ok(TitleIndex { map: Map::new(mmap)? })
     }
 
+    /// Whether an article's own title, or a redirect's, is exactly `query`.
+    /// One seek, not a prefix scan: keys are `normalized \0 entry_be`, so
+    /// every exact match starts with `normalized \0` and the first key at
+    /// or after that bound settles it. [`Self::suggest`] would walk every
+    /// key sharing the prefix, which is right for typing and wasteful for
+    /// an existence check.
+    pub fn has_exact(&self, query: &str) -> bool {
+        let normalized = normalize(query);
+        if normalized.is_empty() {
+            return false;
+        }
+        let mut bound = normalized.into_bytes();
+        bound.push(0);
+        self.map.range().ge(&bound).into_stream().next().is_some_and(|(key, _)| key.starts_with(&bound))
+    }
+
     /// Up to `limit` articles whose title, or a redirect's title, starts with
     /// `query`. One hit per article: exact matches first, then by score.
     pub fn suggest(&self, query: &str, limit: usize) -> Vec<TitleHit> {
@@ -141,6 +157,22 @@ mod tests {
         let exact = idx.suggest("Einstein", 10);
         assert!(exact[0].exact);
         assert_eq!(exact[0].target, 2);
+    }
+
+    /// The miss hint's probe: exact means the whole normalized title, not a
+    /// prefix of it, or "Mer" would claim that another collection has
+    /// "Mercury".
+    #[test]
+    fn has_exact_matches_a_whole_title_or_redirect_and_never_a_prefix() {
+        let (_d, idx) = index(&[("Mercury", 1, 1, 5), ("Mercury (planet)", 2, 2, 9), ("Hg", 3, 1, 0)]);
+        assert!(idx.has_exact("Mercury"));
+        assert!(idx.has_exact("mercury"), "keys are normalized, so matching is too");
+        assert!(idx.has_exact("Hg"), "a redirect title counts: it leads to an article");
+        assert!(!idx.has_exact("Merc"), "a prefix-only match must not fire the hint");
+        assert!(!idx.has_exact("Mercury (pl"));
+        assert!(!idx.has_exact("Venus"));
+        assert!(!idx.has_exact(""));
+        assert!(!idx.has_exact("   "));
     }
 
     #[test]

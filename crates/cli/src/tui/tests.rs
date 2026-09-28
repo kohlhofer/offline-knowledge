@@ -49,6 +49,7 @@ fn app() -> (tempfile::TempDir, App) {
             r#"<html><head><meta http-equiv="refresh" content="0;URL='./Albert_Einstein#Legacy'" /></head></html>"#,
         )
         .metadata("Title", "Tiny")
+        .metadata("Scraper", "mwoffliner 1.17.5")
         .build();
     let dir = tempfile::tempdir().unwrap();
     let zim = dir.path().join("t.zim");

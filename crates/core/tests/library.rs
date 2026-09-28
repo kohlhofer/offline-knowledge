@@ -47,6 +47,7 @@ fn wiki() -> Vec<u8> {
         .redirect("Relativity", "Relativity", "Theory_of_relativity")
         .resource("_res_/style.css", "text/css", b"p{}")
         .metadata("Title", "Tiny wiki")
+        .metadata("Scraper", "mwoffliner 1.17.5")
         .main_page("Albert_Einstein")
         .build()
 }
@@ -227,6 +228,7 @@ fn resolve_title_shorter_prefix_retry_requires_a_reasonable_fraction_of_the_quer
         .article("Cross_product", "Cross product", &page("Cross product", "<p>A binary operation on vectors.</p>"))
         .redirect("Xyzzy", "Xyzzy", "Cross_product")
         .metadata("Title", "Tiny wiki")
+        .metadata("Scraper", "mwoffliner 1.17.5")
         .build();
     std::fs::File::create(&zim).unwrap().write_all(&bytes).unwrap();
     import(&zim, &ImportOptions { heap_bytes: 20_000_000 }, &|_| {}).unwrap();

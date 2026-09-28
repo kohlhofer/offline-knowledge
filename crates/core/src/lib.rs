@@ -3,6 +3,7 @@
 //!
 //! Every frontend (terminal, HTTP, MCP) is a thin adapter over [`Library`].
 
+pub mod collections;
 pub mod document;
 mod error;
 mod fulltext;
@@ -14,6 +15,7 @@ mod stubs;
 pub mod text;
 mod titles;
 
+pub use collections::{Collection, Collections, Label, Skipped};
 pub use document::{Document, Target};
 pub use error::{Error, Result};
 pub use library::{Library, Resolution, SearchResult, Suggestion};

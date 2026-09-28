@@ -5,7 +5,7 @@ use ok_zim::{Archive, DirentKind};
 
 use crate::document::{ArticleContext, Document, Target, parse_article};
 use crate::fulltext::FullText;
-use crate::import::{INDEX_FORMAT, IndexMeta, index_dir_for, read_u32s, stub_aware};
+use crate::import::{IndexMeta, index_dir_for, read_u32s, stub_aware};
 use crate::stubs::StubTable;
 use crate::titles::TitleIndex;
 use crate::{Error, Result};
@@ -72,14 +72,8 @@ const MIN_PREFIX_FRACTION_DEN: usize = 3;
 impl Library {
     pub fn open(zim_path: impl AsRef<Path>) -> Result<Library> {
         let zim_path = zim_path.as_ref().to_path_buf();
+        let meta = IndexMeta::read(&zim_path)?;
         let dir = index_dir_for(&zim_path);
-        if !dir.join("meta.json").exists() {
-            return Err(Error::NotImported(zim_path));
-        }
-        let meta: IndexMeta = serde_json::from_slice(&std::fs::read(dir.join("meta.json"))?)?;
-        if meta.format != INDEX_FORMAT {
-            return Err(Error::IndexFormat { expected: INDEX_FORMAT, found: meta.format });
-        }
         let archive = Archive::open(&zim_path)?;
         let uuid = archive.header().uuid_hex();
         if uuid != meta.zim_uuid || archive.file_len() != meta.zim_bytes {
