@@ -4,6 +4,7 @@ pub mod layout;
 mod outline;
 mod render;
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -25,7 +26,7 @@ const SIDEBAR_GAP: u16 = 3;
 const SIDEBAR_MIN_TERMINAL: u16 = 118;
 const MIN_TEXT_WITH_SIDEBAR: u16 = 40;
 
-pub fn run(library: Library) -> Result<()> {
+pub fn run(library: Arc<Library>) -> Result<()> {
     let mut terminal = ratatui::init();
     let size = terminal.size()?;
     let mut app = App::new(library, size.width, size.height);
@@ -73,7 +74,7 @@ struct Place {
 }
 
 pub struct App {
-    pub library: Library,
+    pub library: Arc<Library>,
     pub screen: Screen,
     pub overlay: Overlay,
     pub query: String,
@@ -95,7 +96,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(library: Library, width: u16, height: u16) -> App {
+    pub fn new(library: Arc<Library>, width: u16, height: u16) -> App {
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
         let status = format!("{} articles · type to search · Ctrl-R random · ? help", library.article_count());
         App {

@@ -56,7 +56,7 @@ fn app() -> (tempfile::TempDir, App) {
     std::fs::write(&zim, bytes).unwrap();
     import(&zim, &ImportOptions { heap_bytes: 20_000_000 }, &|_| {}).unwrap();
     let library = Library::open(&zim).unwrap();
-    (dir, App::new(library, 80, 24))
+    (dir, App::new(Arc::new(library), 80, 24))
 }
 
 fn press(app: &mut App, code: KeyCode) {
@@ -407,7 +407,7 @@ fn dump_screens_for_review() {
 
     for (w, h) in [(60u16, 20u16), (80, 24), (120, 36), (200, 50)] {
         let library = Library::open(&zim).unwrap();
-        let mut app = App::new(library, w, h);
+        let mut app = App::new(Arc::new(library), w, h);
         dump(&mut app, w, h, "01_search_empty");
         type_text(&mut app, "einst");
         dump(&mut app, w, h, "02_suggest_einst");

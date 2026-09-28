@@ -40,14 +40,14 @@ const MAX_CONCURRENT_REQUESTS: usize = 64;
 
 /// Builds its own runtime and blocks on it: `ok serve` is the only reason
 /// this process needs an async executor at all.
-pub fn run(library: Library, bind: SocketAddr) -> Result<()> {
+pub fn run(library: Arc<Library>, bind: SocketAddr) -> Result<()> {
     tokio::runtime::Runtime::new()?.block_on(serve(library, bind))
 }
 
-async fn serve(library: Library, bind: SocketAddr) -> Result<()> {
+async fn serve(library: Arc<Library>, bind: SocketAddr) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
     eprintln!("listening on http://{bind}");
-    accept_loop(listener, Arc::new(library), HEADER_READ_TIMEOUT).await
+    accept_loop(listener, library, HEADER_READ_TIMEOUT).await
 }
 
 /// A descriptor-exhaustion flood must not take the process down: an accept

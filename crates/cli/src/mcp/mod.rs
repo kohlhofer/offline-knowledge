@@ -20,9 +20,9 @@ use serde::Deserialize;
 
 /// Builds its own runtime and blocks on it, like `serve::run` — the default
 /// TUI and every other subcommand pay zero tokio startup cost.
-pub fn run(library: Library) -> Result<()> {
+pub fn run(library: Arc<Library>) -> Result<()> {
     tokio::runtime::Runtime::new()?.block_on(async {
-        let service = Mcp::new(Arc::new(library)).serve(rmcp::transport::stdio()).await?;
+        let service = Mcp::new(library).serve(rmcp::transport::stdio()).await?;
         service.waiting().await?;
         Ok(())
     })
