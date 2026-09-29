@@ -190,18 +190,17 @@ pub fn collections_body(active: &Active) -> String {
             ))
         })
         .collect();
-    // The file's own name, not the path it was given under: the reason
-    // already says what to run, and a response body is not the place for
-    // the server's filesystem layout.
+    // The file's own name and nothing else: every reason names the path
+    // `--zim` was given, and a response body is no place for the server's
+    // filesystem layout. The startup log and `ok collections` carry it.
     let skipped: String = active
         .collections
         .skipped()
         .iter()
         .map(|s| {
             format!(
-                r#"<li><span class="file">{file}</span> <span class="reason">{reason}</span></li>"#,
+                r#"<li><span class="file">{file}</span> <span class="reason">not loaded; run <code>ok collections</code> for the reason</span></li>"#,
                 file = esc(&s.path.file_name().unwrap_or(s.path.as_os_str()).to_string_lossy()),
-                reason = esc(&s.reason),
             )
         })
         .collect();

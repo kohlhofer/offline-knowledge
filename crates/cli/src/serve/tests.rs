@@ -759,14 +759,15 @@ async fn the_server_rendered_forms_on_a_non_default_collection_carry_the_collect
 /// nowhere silently. With one collection it is that collection's own home.
 #[tokio::test]
 async fn home_lists_every_collection_and_the_files_that_could_not_be_loaded() {
-    let (_d, collections) = two_and_a_skipped_file();
+    let (dir, collections) = two_and_a_skipped_file();
     let listing = router(collections).unwrap();
     let body = body_text(get(&listing, "/").await).await;
     assert!(body.contains(r#"<a href="/wikipedia">wikipedia</a>"#), "{body}");
     assert!(body.contains(r#"<a href="/wiktionary">wiktionary</a>"#), "{body}");
     assert!(body.contains("Tiny dictionary") && body.contains("2 articles"), "{body}");
     assert!(body.contains("Not loaded") && body.contains("stray.zim"), "{body}");
-    assert!(body.contains("import"), "the reason names the command that fixes it: {body}");
+    assert!(body.contains("ok collections"), "and where the reason is: {body}");
+    assert!(!body.contains(&dir.path().display().to_string()), "no filesystem path in a response body: {body}");
 
     let (_d, app) = app();
     let body = body_text(get(&app, "/").await).await;
