@@ -267,7 +267,6 @@ fn open_resolves_no_label_and_resolve_labels_is_where_an_unusable_one_is_dropped
 }
 
 /// An index written before `IndexMeta` carried `name` and `scraper` reads
-
 /// them from the ZIM instead, once, when something asks for a label.
 /// Bumping the index format would have forced a re-import of a 2.1 GB file,
 /// so both fields are optional in either direction.

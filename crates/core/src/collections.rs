@@ -432,8 +432,8 @@ fn non_empty(collections: &[Collection], skipped: &[Skipped]) -> Result<()> {
 
 /// Drops every collection whose label is unusable or already taken, naming
 /// it in `skipped`. The first file loaded keeps a contested label.
-
-fn keep_unique_labels(loaded: Vec<Collection>, skipped: &mut Vec<Skipped>) -> Vec<Collection> {
+fn keep_unique_labels
+(loaded: Vec<Collection>, skipped: &mut Vec<Skipped>) -> Vec<Collection> {
     let mut kept: Vec<Collection> = Vec::new();
     for collection in loaded {
         let label = match collection.resolved_label() {
