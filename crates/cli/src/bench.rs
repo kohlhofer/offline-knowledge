@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, ensure};
-use ok_core::Library;
 use ok_core::document::Link;
+use ok_core::{Collections, Library};
 use serde_json::json;
 
 use crate::tui::layout::layout;
@@ -19,7 +19,13 @@ const LAYOUT_WIDTH: u16 = 100;
 const COMMON_QUERIES: &[&str] =
     &["history", "united states", "war", "music", "world", "city", "science", "film", "government", "language"];
 
-pub fn run(library: Arc<Library>, open: Duration, samples: usize, as_json: bool, http: bool) -> Result<()> {
+/// `set_open` is what reading every collection's `meta.json` cost, `open`
+/// what the default collection's [`Library::open`] cost on top: the first
+/// is what a set of collections adds to startup, the second is the row the
+/// README has always carried.
+pub fn run(collections: Arc<Collections>, set_open: Duration, open: Duration, samples: usize, as_json: bool, http: bool) -> Result<()> {
+    // Already open and cached by the caller, which timed it.
+    let library = collections.default().library()?;
     let mut rng = SplitMix(0x5eed);
     let pick = |rng: &mut SplitMix| library.random_article(rng.next()).expect("library has articles");
 
@@ -78,6 +84,7 @@ pub fn run(library: Arc<Library>, open: Duration, samples: usize, as_json: bool,
     }
 
     let mut rows = vec![
+        ("open collections", vec![set_open]),
         ("open library", vec![open]),
         ("suggest (1-6 chars)", suggest),
         ("load + parse article", load),
@@ -87,7 +94,7 @@ pub fn run(library: Arc<Library>, open: Duration, samples: usize, as_json: bool,
         ("search, common word", search_common),
     ];
     if http {
-        rows.push(("GET /wiki/{path} (server)", http_bench(Arc::clone(&library), samples)?));
+        rows.push(("GET /{collection}/{path} (server)", http_bench(collections, Arc::clone(&library), samples)?));
     }
     if as_json {
         let out: Vec<_> = rows
@@ -124,13 +131,14 @@ fn time<T>(f: impl FnOnce() -> T) -> (T, Duration) {
 }
 
 /// Starts `serve`'s router on an ephemeral loopback port, times `samples`
-/// real `GET /wiki/{path}` round trips against it, then shuts it down. The
-/// only place `ok bench` needs a tokio runtime at all.
-fn http_bench(library: Arc<Library>, samples: usize) -> Result<Vec<Duration>> {
+/// real `GET /{collection}/{path}` round trips against it, then shuts it
+/// down. The only place `ok bench` needs a tokio runtime at all.
+fn http_bench(collections: Arc<Collections>, library: Arc<Library>, samples: usize) -> Result<Vec<Duration>> {
     tokio::runtime::Runtime::new()?.block_on(async move {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
-        let app = crate::serve::router(Arc::clone(&library));
+        let base = format!("/{}", collections.default().label()?);
+        let app = crate::serve::router(collections)?;
         let server = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
@@ -140,7 +148,7 @@ fn http_bench(library: Arc<Library>, samples: usize) -> Result<Vec<Duration>> {
         for _ in 0..samples {
             let entry = library.random_article(rng.next()).expect("library has articles");
             let path = library.path(entry)?;
-            let uri = ok_core::html::article_href(crate::serve::WIKI_BASE, &path, None);
+            let uri = ok_core::html::article_href(&base, &path, None);
             let started = Instant::now();
             let response = http_get(addr, &uri).await?;
             ensure!(
@@ -256,7 +264,7 @@ mod tests {
         let zim = dir.path().join("t.zim");
         std::fs::write(&zim, bytes).unwrap();
         ok_core::import::import(&zim, &ok_core::import::ImportOptions { heap_bytes: 20_000_000 }, &|_| {}).unwrap();
-        let library = Arc::new(ok_core::Library::open(&zim).unwrap());
-        run(library, Duration::ZERO, 5, true, false).unwrap();
+        let collections = Arc::new(Collections::open(&[zim], None).unwrap());
+        run(collections, Duration::ZERO, Duration::ZERO, 5, true, false).unwrap();
     }
 }

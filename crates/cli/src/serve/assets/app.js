@@ -16,6 +16,14 @@ const outlineDialog = document.getElementById("outline");
 const helpDialog = document.getElementById("help");
 const article = document.getElementById("article");
 
+// The active collection, written once into <html data-collection>. Every
+// request this file makes carries it, or a reader on one collection gets
+// another's suggestions, search results and random article. Empty on a page
+// that belongs to no collection (an error page), which the server reads as
+// "the default".
+const collection = document.documentElement.dataset.collection || "";
+const withCollection = (url) => `${url}${url.includes("?") ? "&" : "?"}c=${encodeURIComponent(collection)}`;
+
 // ---------------------------------------------------------------------
 // Pure logic: filtering the outline and picking the next/previous link.
 // Kept free of the DOM so they're inspectable and reviewable on their own.
@@ -96,7 +104,9 @@ function renderSuggestions(items, query) {
     li.id = `suggestion-${i}`;
     li.setAttribute("role", "option");
     li.setAttribute("aria-selected", "false");
-    li.dataset.href = `/wiki/${encodeURIComponent(item.path).replace(/%2F/g, "/")}${item.fragment ? "#" + encodeURIComponent(item.fragment) : ""}`;
+    // Built by the server, which already writes every other article href:
+    // one place knows how a path and a collection become a URL.
+    li.dataset.href = item.href;
     li.textContent = item.matched ? `${item.matched} → ${item.title}` : item.title;
     suggestions.appendChild(li);
   });
@@ -104,7 +114,7 @@ function renderSuggestions(items, query) {
   searchAll.id = `suggestion-${items.length}`;
   searchAll.setAttribute("role", "option");
   searchAll.setAttribute("aria-selected", "false");
-  searchAll.dataset.href = `/search?q=${encodeURIComponent(query)}`;
+  searchAll.dataset.href = withCollection(`/search?q=${encodeURIComponent(query)}`);
   searchAll.textContent = `Search all text for "${query}"`;
   suggestions.appendChild(searchAll);
   suggestions.hidden = false;
@@ -121,7 +131,7 @@ async function fetchSuggestions(query) {
   }
   suggestAbort = new AbortController();
   try {
-    const res = await fetch(`/api/suggest?q=${encodeURIComponent(query)}`, { signal: suggestAbort.signal });
+    const res = await fetch(withCollection(`/api/suggest?q=${encodeURIComponent(query)}`), { signal: suggestAbort.signal });
     if (!res.ok) throw new Error(String(res.status));
     renderSuggestions(await res.json(), query);
   } catch (err) {
@@ -436,7 +446,7 @@ document.addEventListener("keydown", (e) => {
       focusAdjacentLink(false);
       break;
     case "r":
-      window.location.href = "/random";
+      window.location.href = withCollection("/random");
       break;
     case "?":
       e.preventDefault();

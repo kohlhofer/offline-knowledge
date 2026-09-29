@@ -4,8 +4,8 @@
 //! through [`esc`] before it reaches a response, the same rule
 //! `ok_core::html` follows for article bodies.
 
-use ok_core::Library;
 use ok_core::text::sanitize;
+use ok_core::{Collection, Collections, Label};
 use serde::Serialize;
 
 /// Sanitizes control characters, then HTML-escapes. Every piece of text this
@@ -15,14 +15,88 @@ fn esc(s: &str) -> String {
     ok_core::html::escape_html(&sanitize(s))
 }
 
+/// The active collection, the set around it and the labels the router
+/// already resolved: everything the page chrome needs to name the brand,
+/// carry the collection on every link and form, and draw the switcher.
+pub struct Active<'a> {
+    pub collections: &'a Collections,
+    pub labels: &'a [Label],
+    pub index: usize,
+}
+
+impl<'a> Active<'a> {
+    pub fn collection(&self) -> &'a Collection {
+        self.collections.at(self.index).expect("an index the router resolved")
+    }
+
+    /// The token in the URL, in the hidden form field and in the switcher:
+    /// validated ASCII by construction, so it needs no escaping in any of
+    /// the three.
+    pub fn label(&self) -> &'a str {
+        self.labels[self.index].as_str()
+    }
+
+    /// The path prefix this collection's article URLs hang off.
+    pub fn base(&self) -> String {
+        format!("/{}", self.label())
+    }
+
+    /// The ZIM's own `Title`: the brand, wherever a human name belongs.
+    pub fn brand(&self) -> &'a str {
+        self.collection().title()
+    }
+}
+
+/// The hidden field that carries the active collection out of a
+/// server-rendered form. Without it a reader on a non-default collection
+/// submits the header search and lands in the default one.
+fn collection_field(label: &str) -> String {
+    format!(r#"<input type="hidden" name="c" value="{label}">"#)
+}
+
+/// One link per collection, showing the **label** — the same token the URL
+/// carries, so what you click and where you land read alike, while the
+/// brand stays the header's own text. Nothing at all with one collection:
+/// there is nowhere to switch to.
+fn switcher(active: &Active) -> String {
+    if active.collections.len() < 2 {
+        return String::new();
+    }
+    let links: String = active
+        .labels
+        .iter()
+        .enumerate()
+        .map(|(i, label)| {
+            let failed = active.collections.at(i).is_some_and(|c| c.failure().is_some());
+            match (i == active.index, failed) {
+                (true, _) => format!(r#"<a class="collection" href="/{label}" aria-current="page">{label}</a>"#),
+                // Not a link: its library could not be opened, so every
+                // page under it would be a 503.
+                (false, true) => format!(r#"<span class="collection failed">{label} · failed</span>"#),
+                (false, false) => format!(r#"<a class="collection" href="/{label}">{label}</a>"#),
+            }
+        })
+        .collect();
+    format!(r#"<nav class="switcher" aria-label="Collections">{links}</nav>"#)
+}
+
 /// The full page: header chrome (persistent search, breadcrumb, live
 /// region), `body`, and the help dialog. `page_title` becomes the `<title>`
-/// tag; `collection_title` is the search box's placeholder, constant across
-/// every page. `q` prefills the search box.
-pub fn shell(page_title: &str, collection_title: &str, q: Option<&str>, body: &str) -> String {
+/// tag; the active collection's brand is the search box's placeholder,
+/// constant across every page of that collection. `q` prefills the search
+/// box. `active` is `None` only on an error page, which belongs to no
+/// collection.
+pub fn shell(page_title: &str, active: Option<&Active>, q: Option<&str>, body: &str) -> String {
+    let brand = active.map_or("Error", |a| a.brand());
+    let home = active.map_or_else(|| "/".to_string(), |a| a.base());
+    let label = active.map_or("", |a| a.label());
+    // One attribute is where app.js reads the active collection, so the
+    // three requests it makes carry it too.
+    let collection_attr = if label.is_empty() { String::new() } else { format!(r#" data-collection="{label}""#) };
+    let collection_input = if label.is_empty() { String::new() } else { collection_field(label) };
     format!(
         r#"<!DOCTYPE html>
-<html lang="en" class="no-js">
+<html lang="en" class="no-js"{collection_attr}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -32,13 +106,13 @@ pub fn shell(page_title: &str, collection_title: &str, q: Option<&str>, body: &s
 <body>
 <header class="chrome">
 <form action="/search" method="get" class="searchbar" role="search">
-<a class="home-link" href="/">{collection_title}</a>
-<input type="text" name="q" id="search-input" value="{q}" placeholder="Search {collection_title}" aria-label="Search {collection_title}" autocomplete="off"
+<a class="home-link" href="{home}">{collection_title}</a>
+{collection_input}<input type="text" name="q" id="search-input" value="{q}" placeholder="Search {collection_title}" aria-label="Search {collection_title}" autocomplete="off"
  aria-autocomplete="list" aria-expanded="false" role="combobox" aria-controls="suggestions">
 <button type="submit">Search all text</button>
 <ul id="suggestions" role="listbox" hidden></ul>
 </form>
-<div id="breadcrumb" class="breadcrumb"></div>
+{switcher}<div id="breadcrumb" class="breadcrumb"></div>
 <div id="live" aria-live="polite" class="sr-only"></div>
 </header>
 <main id="main">{body}</main>
@@ -59,21 +133,67 @@ pub fn shell(page_title: &str, collection_title: &str, q: Option<&str>, body: &s
 </body>
 </html>"#,
         page_title = esc(page_title),
-        collection_title = esc(collection_title),
+        collection_title = esc(brand),
         q = esc(q.unwrap_or_default()),
+        switcher = active.map(switcher).unwrap_or_default(),
         body = body,
     )
 }
 
-pub fn home_body(library: &Library) -> String {
+/// The article count comes from the index's own `meta.json`, so a home page
+/// opens no [`ok_core::Library`] at all.
+pub fn home_body(collection: &Collection) -> String {
     format!(
         r#"<section class="home">
 <p class="count">{count} articles in <strong>{title}</strong>.</p>
 <p class="hint">Start typing above for titles, or press Enter to search the full text. <span class="js-only">Press <kbd>?</kbd> for keys, <kbd>r</kbd> for a random article.</span></p>
 </section>"#,
-        count = with_thousands(library.article_count()),
-        title = esc(&library.meta().title),
+        count = with_thousands(collection.article_count()),
+        title = esc(collection.title()),
     )
+}
+
+/// `/` with more than one collection loaded: a row per collection, and the
+/// files that could not be loaded named underneath. A ZIM dropped into the
+/// directory that goes nowhere must not go nowhere silently.
+pub fn collections_body(active: &Active) -> String {
+    let rows: String = active
+        .labels
+        .iter()
+        .enumerate()
+        .filter_map(|(i, label)| {
+            let collection = active.collections.at(i)?;
+            let state = match collection.failure() {
+                Some(_) => "failed".to_string(),
+                None => format!("{} articles", with_thousands(collection.article_count())),
+            };
+            Some(format!(
+                r#"<li><a href="/{label}">{label}</a> <span class="brand">{brand}</span> <span class="count">{state}</span></li>"#,
+                brand = esc(collection.title()),
+            ))
+        })
+        .collect();
+    // The file's own name, not the path it was given under: the reason
+    // already says what to run, and a response body is not the place for
+    // the server's filesystem layout.
+    let skipped: String = active
+        .collections
+        .skipped()
+        .iter()
+        .map(|s| {
+            format!(
+                r#"<li><span class="file">{file}</span> <span class="reason">{reason}</span></li>"#,
+                file = esc(&s.path.file_name().unwrap_or(s.path.as_os_str()).to_string_lossy()),
+                reason = esc(&s.reason),
+            )
+        })
+        .collect();
+    let not_loaded = if skipped.is_empty() {
+        String::new()
+    } else {
+        format!(r#"<h2>Not loaded</h2><ul class="skipped">{skipped}</ul>"#)
+    };
+    format!(r#"<section class="collections"><h1>Collections</h1><ul class="collection-list">{rows}</ul>{not_loaded}</section>"#)
 }
 
 /// `50001` -> `"50,001"`. `library.article_count()` is in the tens of
@@ -112,7 +232,7 @@ pub fn search_prompt_body() -> String {
 /// wasn't making. Zero is the one count that's true regardless of limit
 /// (no result at 30 means none at any higher limit either); above zero,
 /// says what's actually true: this many are shown.
-pub fn search_body(query: &str, rows: &[SearchRow]) -> String {
+pub fn search_body(base: &str, query: &str, rows: &[SearchRow]) -> String {
     let count = rows.len();
     let heading = if count == 0 {
         format!(r#"<h1>0 results for "{}"</h1>"#, esc(query))
@@ -130,7 +250,7 @@ pub fn search_body(query: &str, rows: &[SearchRow]) -> String {
         .map(|r| {
             format!(
                 r#"<li><a class="result" href="{href}"><span class="title">{title}</span><span class="summary">{summary}</span></a></li>"#,
-                href = esc(&ok_core::html::article_href(super::WIKI_BASE, &r.path, None)),
+                href = esc(&ok_core::html::article_href(base, &r.path, None)),
                 title = esc(&r.title),
                 summary = esc(&r.summary),
             )
@@ -143,6 +263,10 @@ pub fn search_body(query: &str, rows: &[SearchRow]) -> String {
 pub struct SuggestDto {
     pub title: String,
     pub path: String,
+    /// The URL to open, built here rather than in `app.js`: a
+    /// collection-scoped, percent-encoded article href exists in exactly one
+    /// place this way, the Rust side that already writes every other one.
+    pub href: String,
     pub matched: Option<String>,
     pub fragment: Option<String>,
     pub inbound: u32,
@@ -171,14 +295,14 @@ pub struct SuggestionRow {
 /// work with no JS. `fallback_prefix`, when present, names the shortened
 /// prefix `suggestions` actually matched — said explicitly, so a fallback
 /// batch doesn't read as if it answered `requested_path` as typed.
-pub fn not_found_body(requested_path: &str, suggestions: &[SuggestionRow], fallback_prefix: Option<&str>) -> String {
+pub fn not_found_body(active: &Active, requested_path: &str, suggestions: &[SuggestionRow], fallback_prefix: Option<&str>) -> String {
     let display = requested_path.replace('_', " ");
     let suggestion_list = if suggestions.is_empty() {
         String::new()
     } else {
         let items: String = suggestions
             .iter()
-            .map(|s| format!(r#"<li><a href="{href}">{title}</a></li>"#, href = esc(&ok_core::html::article_href(super::WIKI_BASE, &s.path, None)), title = esc(&s.title)))
+            .map(|s| format!(r#"<li><a href="{href}">{title}</a></li>"#, href = esc(&ok_core::html::article_href(&active.base(), &s.path, None)), title = esc(&s.title)))
             .collect();
         let lead = match fallback_prefix {
             Some(prefix) => format!("Titles starting with \"{}\":", esc(&prefix.replace('_', " "))),
@@ -190,9 +314,10 @@ pub fn not_found_body(requested_path: &str, suggestions: &[SuggestionRow], fallb
         r#"<section class="not-found">
 <h1>"{display}" is not in this collection</h1>
 {suggestion_list}
-<form action="/search" method="get"><input type="hidden" name="q" value="{display}"><button type="submit">Search all text for "{display}"</button></form>
+<form action="/search" method="get"><input type="hidden" name="q" value="{display}">{collection_input}<button type="submit">Search all text for "{display}"</button></form>
 </section>"#,
         display = esc(&display),
+        collection_input = collection_field(active.label()),
         suggestion_list = suggestion_list,
     )
 }

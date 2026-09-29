@@ -145,10 +145,17 @@ fn main() -> Result<()> {
         }
         Command::Bench { samples, json, http } => {
             let started = Instant::now();
-            let library = active(&paths, wanted)?;
-            bench::run(library, started.elapsed(), samples, json, http)
+            let collections = set(&paths, wanted)?;
+            let load = started.elapsed();
+            let open = {
+                let started = Instant::now();
+                let default = collections.default();
+                default.library().with_context(|| format!("opening {}", default.zim_path().display()))?;
+                started.elapsed()
+            };
+            bench::run(collections, load, open, samples, json, http)
         }
-        Command::Serve { bind } => serve::run(active(&paths, wanted)?, bind),
+        Command::Serve { bind } => serve::run(set(&paths, wanted)?, bind),
         Command::Mcp => mcp::run(active(&paths, wanted)?),
     }
 }
@@ -193,6 +200,12 @@ fn loaded(paths: &[PathBuf], collection: Option<&str>) -> Result<Collections> {
         eprintln!("skipped {}: {}", show_path(&skipped.path), skipped.reason);
     }
     Ok(collections)
+}
+
+/// The loaded set behind an `Arc`: what a frontend that holds all of them
+/// at once needs.
+fn set(paths: &[PathBuf], collection: Option<&str>) -> Result<Arc<Collections>> {
+    Ok(Arc::new(loaded(paths, collection)?))
 }
 
 /// The active collection's library, and nothing else opened: opening is

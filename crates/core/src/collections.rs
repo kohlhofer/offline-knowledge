@@ -284,6 +284,13 @@ impl Collections {
         self.index_of(label).map(|i| &self.collections[i])
     }
 
+    /// The collection at a position in load order. Every frontend holds its
+    /// active collection as an index — the same index
+    /// [`Self::exact_elsewhere`] takes — so each of them needs this.
+    pub fn at(&self, index: usize) -> Option<&Collection> {
+        self.collections.get(index)
+    }
+
     pub fn index_of(&self, label: &str) -> Option<usize> {
         self.collections.iter().position(|c| c.label().is_ok_and(|l| l.as_str() == label))
     }

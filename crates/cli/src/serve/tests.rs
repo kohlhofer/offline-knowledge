@@ -5,19 +5,20 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::response::Response;
 use http_body_util::BodyExt;
-use ok_core::Library;
 use ok_core::import::{ImportOptions, import};
+use ok_core::Collections;
 use ok_zim::write::ZimBuilder;
 use tower::ServiceExt;
 
-use super::router;
+use super::{RESERVED_SEGMENTS, router};
 
 fn page(title: &str, body: &str) -> String {
     format!(r#"<html><body><h1>{title}</h1><div id="mw-content-text"><div class="mw-parser-output">{body}</div></div></body></html>"#)
 }
 
-fn library() -> (tempfile::TempDir, Library) {
-    let bytes = ZimBuilder::new()
+/// The wikipedia-labeled fixture: the one every URL-shape test reads.
+fn wiki_bytes() -> Vec<u8> {
+    ZimBuilder::new()
         .article(
             "Albert_Einstein",
             "Albert Einstein",
@@ -40,18 +41,62 @@ fn library() -> (tempfile::TempDir, Library) {
         .redirect("Einstein", "Einstein", "Albert_Einstein")
         .resource("_res_/style.css", "text/css", b"p{}")
         .metadata("Title", "Tiny wiki")
+        .metadata("Name", "wikipedia_en_top")
         .metadata("Scraper", "mwoffliner 1.17.5")
-        .build();
-    let dir = tempfile::tempdir().unwrap();
-    let zim = dir.path().join("t.zim");
+        .build()
+}
+
+/// A second collection with the same entry shape as the first — same number
+/// of entries, in the same order — so an article of one shares its entry
+/// index with an article of the other. That collision is the cache key's
+/// whole reason to carry the collection.
+fn dictionary_bytes() -> Vec<u8> {
+    ZimBuilder::new()
+        .article("Mercury", "Mercury", &page("Mercury", r#"<p>A metal, and <a href="Venus">a planet</a>.</p>"#))
+        .article("Venus", "Venus", &page("Venus", "<p>The second planet.</p>"))
+        .article(
+            "Mercury_the_metal",
+            "Mercury the metal",
+            r#"<html><head><meta http-equiv="refresh" content="0;URL='./Mercury'" /></head><body></body></html>"#,
+        )
+        .redirect("Hg", "Hg", "Mercury")
+        .resource("_res_/style.css", "text/css", b"p{}")
+        .metadata("Title", "Tiny dictionary")
+        .metadata("Name", "wiktionary_en-simple_all")
+        .metadata("Scraper", "mwoffliner 1.17.5")
+        .build()
+}
+
+fn write_imported(dir: &std::path::Path, file: &str, bytes: Vec<u8>) -> std::path::PathBuf {
+    let zim = dir.join(file);
     std::fs::write(&zim, bytes).unwrap();
     import(&zim, &ImportOptions { heap_bytes: 20_000_000 }, &|_| {}).unwrap();
-    (dir, Library::open(&zim).unwrap())
+    zim
+}
+
+/// One collection, labeled `wikipedia`.
+fn one() -> (tempfile::TempDir, Arc<Collections>) {
+    let dir = tempfile::tempdir().unwrap();
+    let zim = write_imported(dir.path(), "wikipedia.zim", wiki_bytes());
+    (dir, Arc::new(Collections::open(&[zim], None).unwrap()))
+}
+
+/// Two collections: `wikipedia` (the default) and `wiktionary`.
+fn two() -> (tempfile::TempDir, Arc<Collections>) {
+    let dir = tempfile::tempdir().unwrap();
+    let a = write_imported(dir.path(), "wikipedia.zim", wiki_bytes());
+    let b = write_imported(dir.path(), "wiktionary.zim", dictionary_bytes());
+    (dir, Arc::new(Collections::open(&[a, b], None).unwrap()))
 }
 
 fn app() -> (tempfile::TempDir, Router) {
-    let (dir, library) = library();
-    (dir, router(Arc::new(library)))
+    let (dir, collections) = one();
+    (dir, router(collections).unwrap())
+}
+
+fn app_two() -> (tempfile::TempDir, Router) {
+    let (dir, collections) = two();
+    (dir, router(collections).unwrap())
 }
 
 async fn get(app: &Router, uri: &str) -> Response {
@@ -73,7 +118,8 @@ async fn home_shows_article_count_and_collection_title_with_hints() {
     assert!(body.contains("2 articles"), "{body}");
     assert!(body.contains("Tiny wiki"), "{body}");
     assert!(body.contains('?'), "a hint mentions the help key: {body}");
-    assert!(body.contains(r#"<a class="home-link" href="/">Tiny wiki</a>"#), "a persistent way home in the header: {body}");
+    assert!(body.contains(r#"<a class="home-link" href="/wikipedia">Tiny wiki</a>"#), "a persistent way home in the header: {body}");
+    assert!(!body.contains("switcher"), "one collection: nothing to switch to: {body}");
 }
 
 #[test]
@@ -104,7 +150,7 @@ async fn search_happy_path_links_to_wiki_path_and_shows_a_summary() {
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(res.headers().get("cache-control").unwrap(), "no-cache");
     let body = body_text(res).await;
-    assert!(body.contains("href=\"/wiki/Physicist\""), "{body}");
+    assert!(body.contains("href=\"/wikipedia/Physicist\""), "{body}");
     assert!(body.contains("Studies physics"), "{body}");
 }
 
@@ -159,8 +205,10 @@ async fn oversized_query_is_400_not_silently_truncated() {
 async fn oversized_wiki_path_is_400_not_a_slow_resolve() {
     let (_d, app) = app();
     let long = "a".repeat(201);
-    let res = get(&app, &format!("/wiki/{long}")).await;
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    for uri in [format!("/wiki/{long}"), format!("/wikipedia/{long}")] {
+        let res = get(&app, &uri).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{uri}");
+    }
 }
 
 #[tokio::test]
@@ -174,6 +222,7 @@ async fn api_suggest_returns_title_path_matched_fragment_and_inbound() {
     let hit = &json[0];
     assert_eq!(hit["title"], "Albert Einstein");
     assert_eq!(hit["path"], "Albert_Einstein");
+    assert_eq!(hit["href"], "/wikipedia/Albert_Einstein", "the server builds the href, so one place knows how a path becomes a URL");
     assert!(hit.get("matched").is_some());
     assert!(hit.get("fragment").is_some());
     assert!(hit.get("inbound").is_some());
@@ -182,7 +231,7 @@ async fn api_suggest_returns_title_path_matched_fragment_and_inbound() {
 #[tokio::test]
 async fn wiki_article_renders_title_infobox_and_breadcrumb() {
     let (_d, app) = app();
-    let res = get(&app, "/wiki/Albert_Einstein").await;
+    let res = get(&app, "/wikipedia/Albert_Einstein").await;
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(res.headers().get("cache-control").unwrap(), "no-cache");
     let body = body_text(res).await;
@@ -194,20 +243,20 @@ async fn wiki_article_renders_title_infobox_and_breadcrumb() {
 #[tokio::test]
 async fn wiki_path_resolved_by_title_redirects_to_the_canonical_path() {
     let (_d, app) = app();
-    let res = get(&app, "/wiki/Einstein").await;
+    let res = get(&app, "/wikipedia/Einstein").await;
     assert_eq!(res.status(), StatusCode::FOUND);
     // redirected_from round-trips the requested path so the target page can
     // say "Redirected from Einstein" (N13) — not just the bare canonical URL.
-    assert_eq!(res.headers().get("location").unwrap(), "/wiki/Albert_Einstein?redirected_from=Einstein");
+    assert_eq!(res.headers().get("location").unwrap(), "/wikipedia/Albert_Einstein?redirected_from=Einstein");
     assert_eq!(res.headers().get("cache-control").unwrap(), "no-store");
 }
 
 #[tokio::test]
 async fn wiki_section_redirect_redirects_to_the_canonical_path_with_its_fragment() {
     let (_d, app) = app();
-    let res = get(&app, "/wiki/Einstein_early_life").await;
+    let res = get(&app, "/wikipedia/Einstein_early_life").await;
     assert_eq!(res.status(), StatusCode::FOUND);
-    assert_eq!(res.headers().get("location").unwrap(), "/wiki/Albert_Einstein?redirected_from=Einstein_early_life#Life");
+    assert_eq!(res.headers().get("location").unwrap(), "/wikipedia/Albert_Einstein?redirected_from=Einstein_early_life#Life");
 }
 
 /// The target page names the section redirect it came from (N13): landing
@@ -215,22 +264,22 @@ async fn wiki_section_redirect_redirects_to_the_canonical_path_with_its_fragment
 #[tokio::test]
 async fn wiki_article_shows_a_redirected_from_note_when_the_query_param_is_present() {
     let (_d, app) = app();
-    let res = get(&app, "/wiki/Albert_Einstein?redirected_from=Einstein_early_life").await;
+    let res = get(&app, "/wikipedia/Albert_Einstein?redirected_from=Einstein_early_life").await;
     assert_eq!(res.status(), StatusCode::OK);
     let body = body_text(res).await;
     assert!(body.contains(r#"<p class="redirect-note">Redirected from "Einstein early life"</p>"#), "{body}");
 
     // No note at all when the param is absent — the ordinary case.
-    let body = body_text(get(&app, "/wiki/Albert_Einstein").await).await;
+    let body = body_text(get(&app, "/wikipedia/Albert_Einstein").await).await;
     assert!(!body.contains("redirect-note"), "{body}");
 }
 
 #[tokio::test]
 async fn wiki_article_link_safety_missing_is_real_link_external_has_marker_and_norefferer() {
     let (_d, app) = app();
-    let body = body_text(get(&app, "/wiki/Albert_Einstein").await).await;
-    assert!(body.contains("<a class=\"link missing\" href=\"/wiki/Nowhere\">nobody here</a>"), "{body}");
-    assert!(body.contains("<a class=\"link article\" href=\"/wiki/Physicist\">physicist</a>"), "{body}");
+    let body = body_text(get(&app, "/wikipedia/Albert_Einstein").await).await;
+    assert!(body.contains("<a class=\"link missing\" href=\"/wikipedia/Nowhere\">nobody here</a>"), "{body}");
+    assert!(body.contains("<a class=\"link article\" href=\"/wikipedia/Physicist\">physicist</a>"), "{body}");
     assert!(
         body.contains("<a class=\"link external\" href=\"https://example.org/x\" rel=\"noreferrer\">a source</a>"),
         "{body}"
@@ -244,7 +293,7 @@ async fn wiki_external_link_text_in_a_list_item_stays_visible() {
     // marker span and `a.link.external` itself (which also carries the bare
     // `.external` class), hiding the link text of every external link in a list.
     let (_d, app) = app();
-    let body = body_text(get(&app, "/wiki/Albert_Einstein").await).await;
+    let body = body_text(get(&app, "/wikipedia/Albert_Einstein").await).await;
     assert!(
         body.contains("<a class=\"link external\" href=\"https://example.org/further\" rel=\"noreferrer\">a further reading link</a>"),
         "external link text must stay visible inside a list item: {body}"
@@ -262,7 +311,7 @@ async fn static_app_css_hides_only_the_external_marker_span() {
 #[tokio::test]
 async fn wiki_unknown_path_is_404_with_suggestions_and_a_search_all_text_link() {
     let (_d, app) = app();
-    let res = get(&app, "/wiki/Not_A_Real_Page").await;
+    let res = get(&app, "/wikipedia/Not_A_Real_Page").await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
     assert_eq!(res.headers().get("cache-control").unwrap(), "no-cache");
     let body = body_text(res).await;
@@ -278,11 +327,11 @@ async fn wiki_unknown_path_is_404_with_suggestions_and_a_search_all_text_link() 
 #[tokio::test]
 async fn wiki_near_miss_shows_the_fallback_prefix_not_a_redirect() {
     let (_d, app) = app();
-    let res = get(&app, "/wiki/Einsteinn").await;
+    let res = get(&app, "/wikipedia/Einsteinn").await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND, "a typo must not silently redirect to a different article");
     let body = body_text(res).await;
     assert!(body.contains("Titles starting with \"Einstein\""), "{body}");
-    assert!(body.contains("href=\"/wiki/Albert_Einstein\""), "{body}");
+    assert!(body.contains("href=\"/wikipedia/Albert_Einstein\""), "{body}");
 }
 
 #[tokio::test]
@@ -291,7 +340,7 @@ async fn wiki_non_article_entry_is_404_not_500() {
     // but it isn't a readable article; `resolve_title` refuses it, so the
     // route must land on the 404 page, not a 500.
     let (_d, app) = app();
-    let res = get(&app, "/wiki/_res_/style.css").await;
+    let res = get(&app, "/wikipedia/_res_/style.css").await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
     let body = body_text(res).await;
     assert!(body.contains("not in this collection"), "{body}");
@@ -330,7 +379,7 @@ async fn random_redirects_to_a_valid_wiki_path() {
     assert_eq!(res.status(), StatusCode::FOUND);
     assert_eq!(res.headers().get("cache-control").unwrap(), "no-store");
     let location = res.headers().get("location").unwrap().to_str().unwrap().to_string();
-    assert!(location == "/wiki/Albert_Einstein" || location == "/wiki/Physicist", "{location}");
+    assert!(location == "/wikipedia/Albert_Einstein" || location == "/wikipedia/Physicist", "{location}");
 }
 
 #[tokio::test]
@@ -358,16 +407,17 @@ async fn static_assets_are_served_with_a_long_cache_lifetime() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn chrome_smoke() {
-    let zim = std::env::var("OK_ZIM").expect("OK_ZIM");
-    let library = Library::open(&zim).expect("ok import must have already run");
+    let zim = std::path::PathBuf::from(std::env::var("OK_ZIM").expect("OK_ZIM"));
+    let collections = Collections::open(&[zim], None).expect("ok import must have already run");
+    let label = collections.default().label().unwrap().to_string();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
-        let _ = axum::serve(listener, router(Arc::new(library))).await;
+        let _ = axum::serve(listener, router(Arc::new(collections)).unwrap()).await;
     });
 
     let chrome = std::env::var("CHROME").unwrap_or_else(|_| "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".to_string());
-    for path in ["/", "/wiki/Albert_Einstein"] {
+    for path in ["/".to_string(), format!("/{label}/Albert_Einstein")] {
         // No --virtual-time-budget: paired with --dump-dom it can hang this
         // Chrome build indefinitely instead of budgeting time as documented.
         let output = std::process::Command::new(&chrome)
@@ -396,7 +446,7 @@ async fn real_socket_smoke_test_serves_home_and_an_article() {
     assert_eq!(home.status, 200);
     assert!(String::from_utf8_lossy(&home.body).contains("Tiny wiki"), "{}", String::from_utf8_lossy(&home.body));
 
-    let article = crate::bench::http_get(addr, "/wiki/Albert_Einstein").await.unwrap();
+    let article = crate::bench::http_get(addr, "/wikipedia/Albert_Einstein").await.unwrap();
     assert_eq!(article.status, 200);
     assert!(String::from_utf8_lossy(&article.body).contains("Albert Einstein"));
 
@@ -411,10 +461,10 @@ async fn real_socket_smoke_test_serves_home_and_an_article() {
 async fn half_open_connection_is_closed_after_the_header_read_timeout() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let (_d, library) = library();
+    let (_d, collections) = one();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(super::accept_loop(listener, Arc::new(library), std::time::Duration::from_millis(150)));
+    let server = tokio::spawn(super::accept_loop(listener, collections, std::time::Duration::from_millis(150)));
 
     let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     stream.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n").await.unwrap();
@@ -435,11 +485,11 @@ async fn half_open_connection_is_closed_after_the_header_read_timeout() {
 #[tokio::test]
 #[ignore = "run only as a subprocess with ulimit -n already lowered; see accept_loop_survives_descriptor_exhaustion"]
 async fn accept_loop_flood_worker() {
-    let (_d, library) = library();
+    let (_d, collections) = one();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     println!("PORT={}", listener.local_addr().unwrap().port());
     std::io::Write::flush(&mut std::io::stdout()).unwrap();
-    let _ = super::accept_loop(listener, Arc::new(library), std::time::Duration::from_secs(5)).await;
+    let _ = super::accept_loop(listener, collections, std::time::Duration::from_secs(5)).await;
 }
 
 /// The regression this guards: `listener.accept().await?` used to propagate
@@ -564,11 +614,12 @@ fn article_cache_hit_returns_what_was_inserted() {
     use super::routes::{ArticleCache, CachedArticle};
 
     let cache = ArticleCache::new();
-    assert!(cache.get(1).is_none(), "empty cache misses");
-    cache.insert(1, CachedArticle { title: "A".into(), html: "<p>a</p>".into() });
-    let hit = cache.get(1).expect("just inserted");
+    assert!(cache.get((0, 1)).is_none(), "empty cache misses");
+    cache.insert((0, 1), CachedArticle { title: "A".into(), html: "<p>a</p>".into() });
+    let hit = cache.get((0, 1)).expect("just inserted");
     assert_eq!(hit.title, "A");
     assert_eq!(hit.html, "<p>a</p>");
+    assert!(cache.get((1, 1)).is_none(), "entry 1 of another collection is a different key");
 }
 
 #[test]
@@ -577,21 +628,248 @@ fn article_cache_evicts_the_least_recently_used_entry_past_the_cap() {
 
     let cache = ArticleCache::new();
     for i in 0..MAX_CACHE_ENTRIES as u32 {
-        cache.insert(i, CachedArticle { title: i.to_string(), html: "x".into() });
+        cache.insert((0, i), CachedArticle { title: i.to_string(), html: "x".into() });
     }
     // One more push past the cap evicts entry 0, the least recently used:
     // nothing has been looked up since the fill loop, so eviction order is
     // exactly insertion order.
-    cache.insert(MAX_CACHE_ENTRIES as u32, CachedArticle { title: "new".into(), html: "y".into() });
-    assert!(cache.get(0).is_none(), "the least recently used entry is evicted past the cap");
-    assert!(cache.get(1).is_some(), "everything else survives");
-    assert!(cache.get(MAX_CACHE_ENTRIES as u32).is_some(), "the newest entry is present");
+    cache.insert((0, MAX_CACHE_ENTRIES as u32), CachedArticle { title: "new".into(), html: "y".into() });
+    assert!(cache.get((0, 0)).is_none(), "the least recently used entry is evicted past the cap");
+    assert!(cache.get((0, 1)).is_some(), "everything else survives");
+    assert!(cache.get((0, MAX_CACHE_ENTRIES as u32)).is_some(), "the newest entry is present");
 }
 
 #[tokio::test]
 async fn wiki_article_second_request_serves_the_same_content_from_the_cache() {
     let (_d, app) = app();
-    let first = body_text(get(&app, "/wiki/Albert_Einstein").await).await;
-    let second = body_text(get(&app, "/wiki/Albert_Einstein").await).await;
+    let first = body_text(get(&app, "/wikipedia/Albert_Einstein").await).await;
+    let second = body_text(get(&app, "/wikipedia/Albert_Einstein").await).await;
     assert_eq!(first, second, "a cache hit renders the same page as the first request");
+}
+
+// ---------------------------------------------------------------------
+// Collections: the URL shape, the scoping, the chrome and the switcher.
+// ---------------------------------------------------------------------
+
+/// Two collections plus a `.zim` nobody imported: the third is skipped, and
+/// `/` has to say so.
+fn two_and_a_skipped_file() -> (tempfile::TempDir, Arc<Collections>) {
+    let dir = tempfile::tempdir().unwrap();
+    let a = write_imported(dir.path(), "wikipedia.zim", wiki_bytes());
+    let b = write_imported(dir.path(), "wiktionary.zim", dictionary_bytes());
+    let stray = dir.path().join("stray.zim");
+    std::fs::write(&stray, wiki_bytes()).unwrap();
+    (dir, Arc::new(Collections::open(&[a, b, stray], None).unwrap()))
+}
+
+/// Two collections, the second one's ZIM replaced after import: its index no
+/// longer describes the file, which `Library::open` only finds out at first
+/// use, so this is a collection that fails while the process is serving.
+fn two_with_a_failed_collection() -> (tempfile::TempDir, Arc<Collections>) {
+    let dir = tempfile::tempdir().unwrap();
+    let a = write_imported(dir.path(), "wikipedia.zim", wiki_bytes());
+    let b = write_imported(dir.path(), "wiktionary.zim", dictionary_bytes());
+    std::fs::write(&b, wiki_bytes()).unwrap();
+    (dir, Arc::new(Collections::open(&[a, b], None).unwrap()))
+}
+
+/// Every `/wiki/{path}` URL this server ever handed out still lands, and the
+/// `?redirected_from=` round trip survives the extra hop.
+#[tokio::test]
+async fn wiki_urls_redirect_to_the_wikipedia_collection_with_the_query_string_intact() {
+    let (_d, app) = app_two();
+
+    let res = get(&app, "/wiki/Albert_Einstein").await;
+    assert_eq!(res.status(), StatusCode::FOUND);
+    assert_eq!(res.headers().get("location").unwrap(), "/wikipedia/Albert_Einstein");
+
+    let res = get(&app, "/wiki/Albert_Einstein?redirected_from=Einstein").await;
+    assert_eq!(res.status(), StatusCode::FOUND);
+    assert_eq!(res.headers().get("location").unwrap(), "/wikipedia/Albert_Einstein?redirected_from=Einstein");
+}
+
+/// The one thing no request may do: answer from a collection it did not ask
+/// for. A title that exists next door is still a 404 here.
+#[tokio::test]
+async fn an_article_is_scoped_to_the_collection_in_its_url() {
+    let (_d, app) = app_two();
+    let res = get(&app, "/wiktionary/Albert_Einstein").await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let body = body_text(res).await;
+    assert!(!body.contains("class=\"infobox\""), "no fallback to the collection that does have it: {body}");
+
+    let res = get(&app, "/wiktionary/Mercury").await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(body_text(res).await.contains("A metal"));
+
+    // A first segment that is no collection at all.
+    let res = get(&app, "/nosuchthing/Mercury").await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let body = body_text(res).await;
+    assert!(body.contains("404 Not Found") && body.contains("nosuchthing"), "{body}");
+}
+
+/// `?c=` scopes every ranked list a page can ask for, and the chrome around
+/// it: the brand, the placeholder and the way home all come from `c`, not
+/// from the default collection.
+#[tokio::test]
+async fn search_suggest_and_random_take_their_collection_and_their_brand_from_c() {
+    let (_d, app) = app_two();
+
+    let body = body_text(get(&app, "/search?q=planet&c=wiktionary").await).await;
+    assert!(body.contains("href=\"/wiktionary/Venus\""), "results link into the collection that answered: {body}");
+    assert!(!body.contains("/wikipedia/"), "and nothing links into the default one: {body}");
+    assert!(body.contains(r#"<a class="home-link" href="/wiktionary">Tiny dictionary</a>"#), "the brand comes from c: {body}");
+    assert!(body.contains(r#"placeholder="Search Tiny dictionary""#), "{body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body_text(get(&app, "/api/suggest?q=merc&c=wiktionary").await).await).unwrap();
+    assert_eq!(json[0]["title"], "Mercury");
+    assert_eq!(json[0]["href"], "/wiktionary/Mercury");
+
+    // An absent or empty `c` is the default collection, which is what every
+    // link written before this change carries.
+    let json: serde_json::Value = serde_json::from_str(&body_text(get(&app, "/api/suggest?q=albert&c=").await).await).unwrap();
+    assert_eq!(json[0]["href"], "/wikipedia/Albert_Einstein");
+
+    let res = get(&app, "/random?c=wiktionary").await;
+    assert_eq!(res.status(), StatusCode::FOUND);
+    let location = res.headers().get("location").unwrap().to_str().unwrap().to_string();
+    assert!(location.starts_with("/wiktionary/"), "a random article stays in the collection asked for: {location}");
+}
+
+/// With JavaScript off, a form is the only thing carrying the collection out
+/// of the page. Both server-rendered forms need the hidden field, or a
+/// reader on one collection searches another.
+#[tokio::test]
+async fn the_server_rendered_forms_on_a_non_default_collection_carry_the_collection() {
+    let (_d, app) = app_two();
+    let field = r#"<input type="hidden" name="c" value="wiktionary">"#;
+
+    let body = body_text(get(&app, "/wiktionary/Mercury").await).await;
+    assert!(body.contains(field), "the header search form: {body}");
+
+    let res = get(&app, "/wiktionary/Zzznotathing").await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let body = body_text(res).await;
+    assert_eq!(body.matches(field).count(), 2, "the header form and the 404 page's \"Search all text\" form: {body}");
+}
+
+/// `/` with more than one collection is the list of them, skipped files
+/// included: a ZIM dropped into the directory that goes nowhere must not go
+/// nowhere silently. With one collection it is that collection's own home.
+#[tokio::test]
+async fn home_lists_every_collection_and_the_files_that_could_not_be_loaded() {
+    let (_d, collections) = two_and_a_skipped_file();
+    let listing = router(collections).unwrap();
+    let body = body_text(get(&listing, "/").await).await;
+    assert!(body.contains(r#"<a href="/wikipedia">wikipedia</a>"#), "{body}");
+    assert!(body.contains(r#"<a href="/wiktionary">wiktionary</a>"#), "{body}");
+    assert!(body.contains("Tiny dictionary") && body.contains("2 articles"), "{body}");
+    assert!(body.contains("Not loaded") && body.contains("stray.zim"), "{body}");
+    assert!(body.contains("import"), "the reason names the command that fixes it: {body}");
+
+    let (_d, app) = app();
+    let body = body_text(get(&app, "/").await).await;
+    assert!(body.contains("2 articles in <strong>Tiny wiki</strong>"), "one collection: today's home: {body}");
+    assert!(!body.contains("Collections"), "{body}");
+
+    // And a collection's own home, which reads no library at all.
+    let (_d, app) = app_two();
+    let body = body_text(get(&app, "/wiktionary").await).await;
+    assert!(body.contains("2 articles in <strong>Tiny dictionary</strong>"), "{body}");
+}
+
+/// The switcher shows the **label**, the same token the URL carries, so
+/// what you click and where you land read alike. A collection whose library
+/// cannot be opened is named as failed and is not a link: every page under
+/// it is a 503.
+#[tokio::test]
+async fn the_switcher_shows_labels_marks_the_active_one_and_does_not_link_a_failed_one() {
+    let (_d, app) = app_two();
+    let body = body_text(get(&app, "/wikipedia/Albert_Einstein").await).await;
+    assert!(body.contains(r#"<a class="collection" href="/wikipedia" aria-current="page">wikipedia</a>"#), "{body}");
+    assert!(body.contains(r#"<a class="collection" href="/wiktionary">wiktionary</a>"#), "{body}");
+    assert!(!body.contains("Tiny dictionary"), "the switcher shows labels; the brand stays the header's own text: {body}");
+
+    let (_d, collections) = two_with_a_failed_collection();
+    let app = router(collections).unwrap();
+    assert_eq!(get(&app, "/wiktionary/Mercury").await.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = body_text(get(&app, "/wikipedia/Albert_Einstein").await).await;
+    assert!(body.contains(r#"<span class="collection failed">wiktionary · failed</span>"#), "{body}");
+    assert!(!body.contains(r#"href="/wiktionary""#), "a failed collection is not linked: {body}");
+}
+
+/// Both directions, so neither half can rot: a collection that would shadow
+/// one of this router's own segments stops `ok serve` starting, and every
+/// segment in the list still reaches its own handler.
+#[tokio::test]
+async fn no_collection_may_take_a_reserved_segment_and_every_one_still_reaches_its_handler() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = ZimBuilder::new()
+        .article("Query", "Query", &page("Query", "<p>About queries.</p>"))
+        .metadata("Title", "Tiny search")
+        .metadata("Name", "search_en_all")
+        .metadata("Scraper", "mwoffliner 1.17.5")
+        .build();
+    let zim = write_imported(dir.path(), "search.zim", bytes);
+    let err = router(Arc::new(Collections::open(&[zim], None).unwrap())).err().unwrap().to_string();
+    assert!(err.contains("search") && err.contains("/search"), "the refusal names the route it would shadow: {err}");
+
+    let (_d, app) = app_two();
+    let probes = [
+        ("api", "/api/suggest?q=albert", StatusCode::OK),
+        ("random", "/random", StatusCode::FOUND),
+        ("search", "/search?q=physics", StatusCode::OK),
+        ("static", "/static/app.css", StatusCode::OK),
+        ("wiki", "/wiki/Albert_Einstein", StatusCode::FOUND),
+    ];
+    assert_eq!(probes.iter().map(|p| p.0).collect::<Vec<_>>(), RESERVED_SEGMENTS, "every reserved segment is probed here");
+    for (segment, uri, want) in probes {
+        let res = get(&app, uri).await;
+        assert_eq!(res.status(), want, "{segment}: a static segment must win over /{{collection}}");
+    }
+}
+
+/// Entry indices are per ZIM, so two collections built the same way hand out
+/// the same index for different articles. Keyed by entry alone, the second
+/// request here would serve the first article's render.
+#[tokio::test]
+async fn two_collections_sharing_an_entry_index_do_not_share_a_cached_render() {
+    let (_d, collections) = two();
+    let entry_of = |label: &str, title: &str| -> u32 {
+        let library = collections.get(label).unwrap().library().unwrap();
+        match library.resolve_title(title).unwrap() {
+            ok_core::Resolution::Found(target) => target.entry,
+            other => panic!("{label}/{title} did not resolve: {other:?}"),
+        }
+    };
+    assert_eq!(entry_of("wikipedia", "Physicist"), entry_of("wiktionary", "Venus"), "the fixtures must collide for this to test anything");
+
+    let app = router(collections).unwrap();
+    let first = body_text(get(&app, "/wikipedia/Physicist").await).await;
+    let second = body_text(get(&app, "/wiktionary/Venus").await).await;
+    assert!(first.contains("Studies physics") && !first.contains("second planet"), "{first}");
+    assert!(second.contains("second planet") && !second.contains("Studies physics"), "the cache key carries the collection: {second}");
+}
+
+/// A collection whose ZIM no longer matches its index fails at first use,
+/// while the others keep serving. The response names the label and one fixed
+/// sentence: no path, no uuid, nothing from the error itself.
+#[tokio::test]
+async fn a_failed_collection_answers_503_naming_only_its_label() {
+    let (dir, collections) = two_with_a_failed_collection();
+    let app = router(collections).unwrap();
+
+    let res = get(&app, "/wiktionary/Mercury").await;
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(res.headers().get("cache-control").unwrap(), "no-store");
+    let body = body_text(res).await;
+    assert!(body.contains("503 Service Unavailable") && body.contains("wiktionary"), "{body}");
+    assert!(body.contains("ok import"), "it says what fixes it: {body}");
+    assert!(!body.contains(&dir.path().display().to_string()), "no filesystem path in a response body: {body}");
+    assert!(!body.contains(".okx") && !body.contains("uuid"), "{body}");
+
+    // The others are unaffected.
+    assert_eq!(get(&app, "/wikipedia/Albert_Einstein").await.status(), StatusCode::OK);
+    assert_eq!(get(&app, "/search?q=physics&c=wiktionary").await.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
