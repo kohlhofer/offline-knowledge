@@ -311,34 +311,60 @@ pub struct Collections {
 impl Collections {
     /// Loads every path, reading each one's `meta.json` and no more. A path
     /// that cannot be loaded — no index, an index this version cannot read,
-    /// a ZIM mwoffliner did not write, an unusable or already-taken label —
-    /// is skipped and recorded rather than fatal: the appliance ships
-    /// `OK_ZIM=/data`, so a directory gaining a file is the normal case,
-    /// and one new file must not stop the rest from serving. Only an empty
-    /// result is an error.
+    /// a ZIM mwoffliner did not write — is skipped and recorded rather than
+    /// fatal: the appliance ships `OK_ZIM=/data`, so a directory gaining a
+    /// file is the normal case, and one new file must not stop the rest from
+    /// serving. Only an empty result is an error.
+    ///
+    /// No label is resolved here unless `default_label` names one. On an
+    /// index that predates `IndexMeta.name` — which is every index built
+    /// before this version, including the 2.1 GB one that cannot be rebuilt
+    /// while a server reads it — a label costs an `Archive::open` and a
+    /// metadata-cluster decompression, 1.1 to 1.7 ms per file, and
+    /// `ok suggest` shows no label at all. [`Self::resolve_labels`] is where
+    /// a frontend that does shows asks for them.
     pub fn open(paths: &[PathBuf], default_label: Option<&str>) -> Result<Collections> {
-        let mut loaded = Vec::new();
+        let mut collections = Vec::new();
         let mut skipped = Vec::new();
         for path in paths {
             match Collection::load(path) {
-                Ok(collection) => loaded.push(collection),
+                Ok(collection) => collections.push(collection),
                 Err(e) => skipped.push(Skipped::new(path, &e)),
             }
         }
-        // Uniqueness cannot be checked without resolving every label, so a
-        // set of more than one pays for its labels here. Exactly one needs
-        // no label until a frontend asks for one, and then only when the
-        // index predates `IndexMeta.name`.
-        let collections = if loaded.len() > 1 { keep_unique_labels(loaded, &mut skipped) } else { loaded };
-        if collections.is_empty() {
-            return Err(Error::NoCollections { skipped: skipped_note(&skipped) });
-        }
         let default_index = match default_label {
-            Some(wanted) => index_of_label(&collections, wanted, &skipped)?,
-            None => 0,
+            // Finding a named label forces every label anyway, so the
+            // uniqueness check is free here and the set arrives resolved.
+            Some(wanted) => {
+                collections = keep_unique_labels(collections, &mut skipped);
+                non_empty(&collections, &skipped)?;
+                index_of_label(&collections, wanted, &skipped)?
+            }
+            None => {
+                non_empty(&collections, &skipped)?;
+                0
+            }
         };
         Ok(Collections { collections, skipped, default_index })
     }
+
+    /// Every label resolved, and every collection whose label is unusable or
+    /// already another file's dropped and recorded: what a frontend that
+    /// shows or routes labels needs, and what a one-shot that shows none
+    /// must not pay for (`--zim data/ suggest pac` paid +3.1 ms for three
+    /// labels it never used, 15x the 0.20 ms a suggestion itself costs).
+    /// Free the second time: labels are cached, and a set that has been
+    /// through this has nothing left to drop.
+    pub fn resolve_labels(mut self) -> Result<Collections> {
+        self.collections = keep_unique_labels(std::mem::take(&mut self.collections), &mut self.skipped);
+        non_empty(&self.collections, &self.skipped)?;
+        // `default_index` is either 0, or an index into a set this already
+        // ran over. Dropping the first collection therefore moves the
+        // default to the next one in load order, which is what `default`
+        // promises when nothing named one.
+        Ok(self)
+    }
+
 
     pub fn iter(&self) -> std::slice::Iter<'_, Collection> {
         self.collections.iter()
@@ -396,8 +422,17 @@ impl Collections {
     }
 }
 
+/// An empty set is not a working process, whichever pass emptied it.
+fn non_empty(collections: &[Collection], skipped: &[Skipped]) -> Result<()> {
+    if collections.is_empty() {
+        return Err(Error::NoCollections { skipped: skipped_note(skipped) });
+    }
+    Ok(())
+}
+
 /// Drops every collection whose label is unusable or already taken, naming
 /// it in `skipped`. The first file loaded keeps a contested label.
+
 fn keep_unique_labels(loaded: Vec<Collection>, skipped: &mut Vec<Skipped>) -> Vec<Collection> {
     let mut kept: Vec<Collection> = Vec::new();
     for collection in loaded {

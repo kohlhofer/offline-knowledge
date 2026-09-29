@@ -94,7 +94,7 @@ fn main() -> Result<()> {
             // Not through `loaded`: the report below owns the skipped lines
             // for this one command, so they are not printed to stderr first
             // and then again to stdout around the loaded list.
-            print!("{}", collections_report(&Collections::open(&paths, wanted)?)?);
+            print!("{}", collections_report(&Collections::open(&paths, wanted)?.resolve_labels()?)?);
             Ok(())
         }
         Command::Tui => tui::run(set(&paths, wanted)?),
@@ -150,7 +150,11 @@ fn main() -> Result<()> {
         }
         Command::Bench { samples, json, http } => {
             let started = Instant::now();
-            let collections = set(&paths, wanted)?;
+            // The cheap set on purpose: the row below reports what opening a
+            // set of collections costs, and `ok bench` shows no label. The
+            // one `--http` needs is resolved in `bench::http_bench`, outside
+            // every timed row.
+            let collections = Arc::new(loaded(&paths, wanted)?);
             let load = started.elapsed();
             let open = {
                 let started = Instant::now();
@@ -221,11 +225,13 @@ fn loaded(paths: &[PathBuf], collection: Option<&str>) -> Result<Collections> {
     Ok(collections)
 }
 
-/// The loaded set behind an `Arc`: what a frontend that holds all of them
-/// at once needs.
+/// The loaded set behind an `Arc`, every label resolved: what a frontend
+/// that shows or routes labels needs. A one-shot goes through [`active`]
+/// instead and resolves none.
 fn set(paths: &[PathBuf], collection: Option<&str>) -> Result<Arc<Collections>> {
-    Ok(Arc::new(loaded(paths, collection)?))
+    Ok(Arc::new(loaded(paths, collection)?.resolve_labels()?))
 }
+
 
 /// The active collection's library, and nothing else opened: opening is
 /// what costs.

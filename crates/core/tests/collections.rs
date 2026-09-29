@@ -119,7 +119,10 @@ fn an_unusable_file_is_skipped_with_a_reason_and_the_rest_load() {
     });
     build(dir.path(), "legacy.zim", "wikivoyage_en_all", "Wikivoyage", Some("sotoki 1.3"), &["Ulm"]);
 
-    let set = Collections::open(&[raw.clone(), good, scraped.clone(), legacy.clone()], None).unwrap();
+    // `resolve_labels`, because two of the four are only found out when a
+    // label is resolved: the legacy one's scraper and, in the test below, a
+    // label already taken.
+    let set = Collections::open(&[raw.clone(), good, scraped.clone(), legacy.clone()], None).unwrap().resolve_labels().unwrap();
     assert_eq!(set.len(), 1);
     assert_eq!(set.default().label().unwrap().as_str(), "wikipedia");
 
@@ -206,7 +209,7 @@ fn a_label_collision_skips_the_second_file_and_names_both() {
     let dir = tempfile::tempdir().unwrap();
     let en = imported(dir.path(), "en.zim", "wikipedia_en_top", "Best of Wikipedia", &["Albert Einstein"]);
     let de = imported(dir.path(), "de.zim", "wikipedia_de_all", "Wikipedia", &["Ulm"]);
-    let set = Collections::open(&[en, de.clone()], None).unwrap();
+    let set = Collections::open(&[en, de.clone()], None).unwrap().resolve_labels().unwrap();
 
     assert_eq!(set.len(), 1);
     assert_eq!(set.skipped().len(), 1);
@@ -223,7 +226,48 @@ fn a_label_collision_skips_the_second_file_and_names_both() {
 }
 
 
+/// A one-shot pays for no label it does not use. `Collections::open` forced
+/// every label whenever more than one path was given, purely to check
+/// uniqueness: +3.1 ms on `--zim data/ suggest pac` against the same query
+/// on one file, 15x what a suggestion itself costs, on every invocation
+/// forever, and the appliance ships `OK_ZIM=/data`. A ZIM whose file is gone
+/// is the executable form of "no ZIM is opened": its `meta.json` still
+/// loads, and it is dropped only once a label is actually wanted.
+#[test]
+fn open_resolves_no_label_and_resolve_labels_is_where_an_unusable_one_is_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = imported(dir.path(), "a.zim", "wikipedia_en_top", "Best of Wikipedia", &["Albert Einstein"]);
+    let gone = imported(dir.path(), "gone.zim", "wiktionary_en-simple_all", "Wiktionary", &["Mercury"]);
+    rewrite_meta(&a, |m| {
+        m.name = None;
+        m.scraper = None;
+    });
+    rewrite_meta(&gone, |m| {
+        m.name = None;
+        m.scraper = None;
+    });
+    std::fs::remove_file(&gone).unwrap();
+
+    let set = Collections::open(&[a.clone(), gone.clone()], None).unwrap();
+    assert_eq!(set.len(), 2, "both loaded: `open` reads meta.json and never the ZIM");
+    assert!(set.skipped().is_empty());
+    assert_eq!(set.default().zim_path(), a, "and the default is the first path given");
+
+    let set = Collections::open(&[a.clone(), gone.clone()], None).unwrap().resolve_labels().unwrap();
+    assert_eq!(set.len(), 1, "a label is wanted now, so the one that cannot give one is dropped");
+    assert_eq!(set.skipped()[0].path, gone);
+    assert_eq!(set.default().label().unwrap().as_str(), "wikipedia");
+
+    // Naming a default has to find it, so that path resolves every label
+    // itself — and the set it hands back needs no second pass.
+    let set = Collections::open(&[a, gone.clone()], Some("wikipedia")).unwrap();
+    assert_eq!(set.len(), 1);
+    assert_eq!(set.skipped()[0].path, gone);
+    assert_eq!(set.resolve_labels().unwrap().len(), 1, "idempotent");
+}
+
 /// An index written before `IndexMeta` carried `name` and `scraper` reads
+
 /// them from the ZIM instead, once, when something asks for a label.
 /// Bumping the index format would have forced a re-import of a 2.1 GB file,
 /// so both fields are optional in either direction.
