@@ -1,4 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ok_core::Collections;
 use ok_core::import::{ImportOptions, import};
 use ok_zim::write::ZimBuilder;
 use ratatui::Terminal;
@@ -52,11 +53,52 @@ fn app() -> (tempfile::TempDir, App) {
         .metadata("Scraper", "mwoffliner 1.17.5")
         .build();
     let dir = tempfile::tempdir().unwrap();
-    let zim = dir.path().join("t.zim");
+    let zim = imported(dir.path(), "t.zim", bytes);
+    (dir, app_over(&[zim]))
+}
+
+/// Writes a ZIM and imports it, as `ok import` would.
+fn imported(dir: &std::path::Path, file: &str, bytes: Vec<u8>) -> std::path::PathBuf {
+    let zim = dir.join(file);
     std::fs::write(&zim, bytes).unwrap();
     import(&zim, &ImportOptions { heap_bytes: 20_000_000 }, &|_| {}).unwrap();
-    let library = Library::open(&zim).unwrap();
-    (dir, App::new(Arc::new(library), 80, 24))
+    zim
+}
+
+/// An `App` over a set of imported ZIMs, the first one active.
+fn app_over(paths: &[std::path::PathBuf]) -> App {
+    let collections = Arc::new(Collections::open(paths, None).unwrap());
+    let library = collections.default().library().unwrap();
+    App::new(collections, library, 80, 24)
+}
+
+/// A second collection, so the picker has somewhere to switch to. Its own
+/// titles are distinct from the first's, which is how a test tells which
+/// collection answered a query.
+fn two_collections() -> (tempfile::TempDir, App) {
+    let dir = tempfile::tempdir().unwrap();
+    let a = imported(
+        dir.path(),
+        "a.zim",
+        ZimBuilder::new()
+            .article("Albert_Einstein", "Albert Einstein", &page("Albert Einstein", r#"<p>A <a href="Physicist">physicist</a>.</p>"#))
+            .article("Physicist", "Physicist", &page("Physicist", "<p>Studies physics.</p>"))
+            .metadata("Title", "Tiny wiki")
+            .metadata("Name", "wikipedia_en_top")
+            .metadata("Scraper", "mwoffliner 1.17.5")
+            .build(),
+    );
+    let b = imported(
+        dir.path(),
+        "b.zim",
+        ZimBuilder::new()
+            .article("Mercury", "Mercury", &page("Mercury", "<p>A metal, and a planet.</p>"))
+            .metadata("Title", "Tiny dictionary")
+            .metadata("Name", "wiktionary_en-simple_all")
+            .metadata("Scraper", "mwoffliner 1.17.5")
+            .build(),
+    );
+    (dir, app_over(&[a, b]))
 }
 
 fn press(app: &mut App, code: KeyCode) {
@@ -356,6 +398,112 @@ fn renders_every_screen_without_panicking_at_small_and_large_sizes() {
     assert!(screen.contains("Physicist"));
 }
 
+/// The whole screen as text, for the assertions that are about what the
+/// reader sees rather than about `App`'s state.
+fn screen(app: &mut App) -> String {
+    let (w, h) = (app.width, app.height);
+    let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+    terminal.draw(|f| render::draw(f, app)).unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    (0..h).map(|y| (0..w).map(|x| buffer[(x, y)].symbol()).collect::<String>() + "\n").collect()
+}
+
+fn ctrl(app: &mut App, c: char) {
+    app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+}
+
+/// Ctrl-T shows what is loaded before anything commits to it: label, the
+/// ZIM's own title, and how many articles. Esc changes nothing.
+#[test]
+fn ctrl_t_opens_a_picker_of_every_collection_and_esc_changes_nothing() {
+    let (_d, mut app) = two_collections();
+    ctrl(&mut app, 't');
+    assert!(matches!(app.overlay, Overlay::Collections(_)));
+    let text = screen(&mut app);
+    assert!(text.contains("Collections · 2"), "{text}");
+    assert!(text.contains("wikipedia · Tiny wiki · 2 articles"), "label, title and count: {text}");
+    assert!(text.contains("wiktionary · Tiny dictionary · 1 articles"), "{text}");
+
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.overlay, Overlay::None);
+    assert_eq!(app.active, 0);
+    assert_eq!(app.library.meta().title, "Tiny wiki");
+}
+
+/// An actual switch takes the library, the open article and both history
+/// stacks with it: an entry index means a different article in a different
+/// ZIM. The label moves to the fixed part of the status bar, where the
+/// transient line cannot overwrite it.
+#[test]
+fn enter_on_another_collection_switches_and_clears_the_history() {
+    let (_d, mut app) = two_collections();
+    type_text(&mut app, "alb");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(title(&app), "Physicist");
+    assert!(screen(&mut app).contains(" wikipedia · Physicist"), "the label is in the fixed segment");
+
+    ctrl(&mut app, 't');
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+
+    assert_eq!(app.active, 1);
+    assert_eq!(app.library.meta().title, "Tiny dictionary");
+    assert!(app.article.is_none(), "the open article belonged to the other ZIM");
+    assert_eq!(app.screen, Screen::Search);
+    assert!(app.status.contains("history cleared"), "{}", app.status);
+    let text = screen(&mut app);
+    assert!(text.contains(" wiktionary · search · history cleared"), "{text}");
+
+    assert!(app.back.is_empty() && app.forward.is_empty(), "both stacks held entry indices from the other ZIM");
+
+    type_text(&mut app, "merc");
+    assert_eq!(app.suggestions[0].title, "Mercury", "suggestions come from the collection now active");
+    type_text(&mut app, "zzz");
+    app.set_query("alb".into());
+    assert!(app.suggestions.is_empty(), "and only from it: {:?}", app.suggestions);
+}
+
+/// Enter on the collection already active is not a switch, so it clears
+/// nothing.
+#[test]
+fn enter_on_the_current_collection_changes_nothing() {
+    let (_d, mut app) = two_collections();
+    type_text(&mut app, "alb");
+    press(&mut app, KeyCode::Enter);
+    ctrl(&mut app, 't');
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.active, 0);
+    assert_eq!(title(&app), "Albert Einstein", "the article stays open");
+    assert!(!app.status.contains("history cleared"), "{}", app.status);
+}
+
+/// One collection: nothing to switch to, so Ctrl-T does nothing and the
+/// status bar reads exactly as it did before collections existed.
+#[test]
+fn with_one_collection_ctrl_t_does_nothing_and_the_status_bar_is_unchanged() {
+    let (_d, mut app) = app();
+    ctrl(&mut app, 't');
+    assert_eq!(app.overlay, Overlay::None);
+    assert_eq!(app.label(), None);
+    let text = screen(&mut app);
+    assert!(text.contains(" search"), "{text}");
+    assert!(!text.contains("Collections"), "{text}");
+    assert!(!text.contains("Ctrl-T collections"), "the opening status line does not offer it either: {text}");
+}
+
+#[test]
+fn the_help_overlay_lists_ctrl_t() {
+    let (_d, mut app) = two_collections();
+    // Tall enough for the whole table: the popup is 70% of the screen and
+    // clips the rows past it.
+    app.resize(120, 44);
+    press(&mut app, KeyCode::Char('?'));
+    let text = screen(&mut app);
+    assert!(text.contains("Ctrl-T"), "{text}");
+}
+
 #[test]
 fn ctrl_c_quits_from_anywhere() {
     let (_d, mut app) = app();
@@ -406,8 +554,8 @@ fn dump_screens_for_review() {
     };
 
     for (w, h) in [(60u16, 20u16), (80, 24), (120, 36), (200, 50)] {
-        let library = Library::open(&zim).unwrap();
-        let mut app = App::new(Arc::new(library), w, h);
+        let mut app = app_over(&[std::path::PathBuf::from(&zim)]);
+        app.resize(w, h);
         dump(&mut app, w, h, "01_search_empty");
         type_text(&mut app, "einst");
         dump(&mut app, w, h, "02_suggest_einst");

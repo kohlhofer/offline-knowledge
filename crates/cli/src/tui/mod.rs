@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ok_core::document::Link;
-use ok_core::{Library, SearchResult, Suggestion, Target};
+use ok_core::{Collections, Library, SearchResult, Suggestion, Target};
 
 use layout::{Laid, Sidebar, layout_with};
 use outline::Outline;
@@ -26,10 +26,13 @@ const SIDEBAR_GAP: u16 = 3;
 const SIDEBAR_MIN_TERMINAL: u16 = 118;
 const MIN_TEXT_WITH_SIDEBAR: u16 = 40;
 
-pub fn run(library: Arc<Library>) -> Result<()> {
+pub fn run(collections: Arc<Collections>) -> Result<()> {
+    // Before the terminal goes into raw mode: a library that cannot be
+    // opened must fail as a plain error, not behind a restored screen.
+    let library = collections.default().library()?;
     let mut terminal = ratatui::init();
     let size = terminal.size()?;
-    let mut app = App::new(library, size.width, size.height);
+    let mut app = App::new(collections, library, size.width, size.height);
     let result = (|| -> Result<()> {
         while !app.quit {
             terminal.draw(|frame| render::draw(frame, &mut app))?;
@@ -55,7 +58,16 @@ pub enum Screen {
 pub enum Overlay {
     None,
     Outline(Outline),
+    Collections(CollectionPicker),
     Help,
+}
+
+/// The collection picker: a fixed list, so no query and no filtering —
+/// cycling would commit before showing where it was going, and Esc out of
+/// this costs nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionPicker {
+    pub selected: usize,
 }
 
 pub struct ArticleView {
@@ -74,6 +86,11 @@ struct Place {
 }
 
 pub struct App {
+    pub collections: Arc<Collections>,
+    /// The active collection: an index into `collections`, and the one
+    /// `library` belongs to. Exactly one is active, so every ranked list
+    /// this app shows comes from one ZIM.
+    pub active: usize,
     pub library: Arc<Library>,
     pub screen: Screen,
     pub overlay: Overlay,
@@ -96,10 +113,17 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(library: Arc<Library>, width: u16, height: u16) -> App {
+    /// `library` is `collections`' default collection, already open: see
+    /// [`run`] for why it is opened out here.
+    pub fn new(collections: Arc<Collections>, library: Arc<Library>, width: u16, height: u16) -> App {
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
-        let status = format!("{} articles · type to search · Ctrl-R random · ? help", library.article_count());
+        let mut status = format!("{} articles · type to search · Ctrl-R random · ? help", library.article_count());
+        if collections.len() > 1 {
+            status = format!("{status} · Ctrl-T collections");
+        }
         App {
+            active: collections.default_index(),
+            collections,
             library,
             screen: Screen::Search,
             overlay: Overlay::None,
@@ -118,6 +142,17 @@ impl App {
             quit: false,
             seed,
         }
+    }
+
+    /// The active collection's label, shown only when the process holds
+    /// more than one: a single-collection reader looks exactly as it did
+    /// before collections existed. Every label is already resolved and
+    /// cached by then, so this reads no ZIM.
+    pub fn label(&self) -> Option<&str> {
+        if self.collections.len() < 2 {
+            return None;
+        }
+        self.collections.at(self.active)?.label().ok().map(|l| l.as_str())
     }
 
     /// The infobox column, when the reader wants it and the terminal is wide enough.
@@ -172,6 +207,12 @@ impl App {
             self.random();
             return;
         }
+        // Global beside Ctrl-R, and modified because it has to work on both
+        // screens: every printable character types into the search box.
+        if ctrl && key.code == KeyCode::Char('t') {
+            self.open_collections();
+            return;
+        }
         match &self.overlay {
             Overlay::Help => {
                 self.overlay = Overlay::None;
@@ -179,6 +220,10 @@ impl App {
             }
             Overlay::Outline(_) => {
                 self.outline_key(key);
+                return;
+            }
+            Overlay::Collections(_) => {
+                self.collections_key(key);
                 return;
             }
             Overlay::None => {}
@@ -343,6 +388,64 @@ impl App {
             _ => {}
         }
         self.overlay = Overlay::Outline(outline);
+    }
+
+    /// Nothing to pick from with one collection, so Ctrl-T does nothing
+    /// rather than opening an overlay with one row.
+    fn open_collections(&mut self) {
+        if self.collections.len() < 2 {
+            return;
+        }
+        self.overlay = Overlay::Collections(CollectionPicker { selected: self.active });
+    }
+
+    /// Arrows, Tab and Ctrl-N/P move; Enter switches; Esc closes and
+    /// changes nothing.
+    fn collections_key(&mut self, key: KeyEvent) {
+        let Overlay::Collections(mut picker) = std::mem::replace(&mut self.overlay, Overlay::None) else { return };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let last = self.collections.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Esc => return,
+            KeyCode::Enter => {
+                self.switch_to(picker.selected);
+                return;
+            }
+            KeyCode::Down | KeyCode::Tab => picker.selected = (picker.selected + 1).min(last),
+            KeyCode::Up | KeyCode::BackTab => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Char('n') if ctrl => picker.selected = (picker.selected + 1).min(last),
+            KeyCode::Char('p') if ctrl => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Home => picker.selected = 0,
+            KeyCode::End => picker.selected = last,
+            _ => {}
+        }
+        self.overlay = Overlay::Collections(picker);
+    }
+
+    /// Enter in the picker. The collection already active changes nothing.
+    /// Another one takes the open article and both history stacks with it: a
+    /// `Place` remembers an entry index, and an entry index means a
+    /// different article in a different ZIM.
+    fn switch_to(&mut self, index: usize) {
+        if index == self.active {
+            return;
+        }
+        let Some(collection) = self.collections.at(index) else { return };
+        let library = match collection.library() {
+            Ok(library) => library,
+            Err(e) => {
+                self.status = format!("could not open that collection: {e}");
+                return;
+            }
+        };
+        self.active = index;
+        self.library = library;
+        self.article = None;
+        self.back.clear();
+        self.forward.clear();
+        self.screen = Screen::Search;
+        self.set_query(String::new());
+        self.status = "history cleared".into();
     }
 
     fn follow_selected(&mut self) {

@@ -92,7 +92,7 @@ fn main() -> Result<()> {
             print!("{}", collections_report(&loaded(&paths, wanted)?)?);
             Ok(())
         }
-        Command::Tui => tui::run(active(&paths, wanted)?),
+        Command::Tui => tui::run(set(&paths, wanted)?),
         Command::Suggest { query, limit } => {
             let library = active(&paths, wanted)?;
             let started = Instant::now();

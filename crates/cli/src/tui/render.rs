@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 
 use super::layout::{self as laid, Kind};
 use super::outline::{Outline, ancestors};
-use super::{App, Overlay, Screen};
+use super::{App, CollectionPicker, Overlay, Screen};
 
 const ACCENT: Color = Color::Cyan;
 
@@ -20,6 +20,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     match &app.overlay {
         Overlay::None => {}
         Overlay::Outline(state) => outline(frame, app, body, state),
+        Overlay::Collections(state) => collections(frame, app, body, state),
         Overlay::Help => help(frame, body),
     }
 }
@@ -162,6 +163,12 @@ fn status_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
         }
         _ => " search".to_string(),
     };
+    // The label goes in the fixed part, not in `app.status`: the transient
+    // line carries "history cleared", link messages and errors, any of
+    // which would otherwise overwrite it.
+    if let Some(label) = app.label() {
+        left = format!(" {label} ·{left}");
+    }
     if !app.status.is_empty() {
         left = format!("{left} · {}", app.status);
     }
@@ -255,6 +262,60 @@ fn outline(frame: &mut Frame<'_>, app: &App, area: Rect, state: &Outline) {
     frame.render_stateful_widget(widget, list, &mut list_state);
 }
 
+/// The picker: label, the ZIM's own `Title`, and how many articles — one
+/// naming system per column, the label being what the reader will see in
+/// the status bar afterwards.
+fn collections(frame: &mut Frame<'_>, app: &App, area: Rect, state: &CollectionPicker) {
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    let rows: Vec<(String, String, String)> = app
+        .collections
+        .iter()
+        .map(|c| {
+            let label = c.label().map(|l| l.to_string()).unwrap_or_else(|_| "?".to_string());
+            let state = match c.failure() {
+                Some(_) => " · failed".to_string(),
+                None => format!(" · {} articles", c.article_count()),
+            };
+            (label, laid::sanitize(c.title()), state)
+        })
+        .collect();
+    let widest = rows.iter().map(|(l, t, s)| 2 + laid::display_width(l) + 3 + laid::display_width(t) + laid::display_width(s)).max().unwrap_or(0);
+    let popup = if area.width < 70 {
+        area
+    } else {
+        let width = (widest as u16 + 4).clamp(40, area.width.saturating_sub(4));
+        let height = (rows.len() as u16 + 2).clamp(3, area.height.saturating_sub(2));
+        Rect { x: area.x + (area.width - width) / 2, y: area.y + (area.height - height) / 2, width, height }
+    };
+    frame.render_widget(Clear, popup);
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .title(format!(" Collections · {} ", rows.len()))
+        .title_bottom(Line::from(" ↑ ↓ moves · Enter switches · Esc closes ").style(dim));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let room = usize::from(inner.width);
+    let items: Vec<ListItem<'_>> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, (label, title, state))| {
+            let marker = if i == app.active { "● " } else { "  " };
+            let used = 2 + laid::display_width(label) + 3 + laid::display_width(state);
+            let title = truncate(title, room.saturating_sub(used));
+            ListItem::new(Line::from(vec![
+                Span::styled(marker, Style::new().fg(ACCENT)),
+                Span::styled(label.clone(), Style::new().add_modifier(Modifier::BOLD)),
+                Span::styled(" · ", dim),
+                Span::raw(title),
+                Span::styled(state.clone(), dim),
+            ]))
+        })
+        .collect();
+    let mut list_state = ListState::default().with_selected(Some(state.selected));
+    let widget = List::new(items).highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+    frame.render_stateful_widget(widget, inner, &mut list_state);
+}
+
 fn help(frame: &mut Frame<'_>, area: Rect) {
     let rows = [
         ("Search", ""),
@@ -272,6 +333,7 @@ fn help(frame: &mut Frame<'_>, area: Rect) {
         ("o", "outline: type to filter, Enter jumps"),
         ("/  s", "search"),
         ("i", "facts column on or off (wide terminals)"),
+        ("Ctrl-T", "collections: pick the one to read"),
         ("r  Ctrl-R", "random article"),
         ("q  Ctrl-C", "quit"),
     ];
