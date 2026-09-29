@@ -221,12 +221,22 @@ pub struct HomeParams {
 /// one collection's own home when it holds one.
 pub async fn home(State(state): State<AppState>, Query(params): Query<HomeParams>) -> Response {
     let active = default_active(&state);
-    let (title, body) = if state.collections.len() > 1 {
-        ("Collections".to_string(), page::collections_body(&active))
-    } else {
-        (active.brand().to_string(), page::home_body(active.collection()))
-    };
-    let body = page::shell(&title, Some(&active), params.q.as_deref(), &body);
+    if state.collections.len() < 2 {
+        // With one collection this *is* its home page, so it answers for it,
+        // the free `failure()` guard included.
+        if active.collection().failure().is_some() {
+            return unavailable_html(&active);
+        }
+        let body = page::shell(active.brand(), Some(&active), params.q.as_deref(), &page::home_body(active.collection()));
+        return ([(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-store")], Html(body)).into_response();
+    }
+    let body = page::shell_with(
+        "Collections",
+        Some(&active),
+        params.q.as_deref(),
+        &page::collections_body(&active),
+        page::Chrome::Root,
+    );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-store")], Html(body)).into_response()
 }
 

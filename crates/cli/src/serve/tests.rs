@@ -841,6 +841,32 @@ async fn home_lists_every_collection_and_the_files_that_could_not_be_loaded() {
     assert!(body.contains("2 articles in <strong>Tiny dictionary</strong>"), "{body}");
 }
 
+/// `/` answered "where am I" three ways at once: the title said Collections,
+/// the brand said whichever collection sorted first, the switcher marked that
+/// one `aria-current`, and the header box silently searched it. It belongs to
+/// none of them, and it had also dropped the teaching line a collection's own
+/// home page carries.
+#[tokio::test]
+async fn the_collection_list_is_branded_for_the_process_and_marks_nothing_current() {
+    let (_d, app) = app_two();
+    let body = body_text(get(&app, "/").await).await;
+
+    assert!(body.contains(r#"<a class="home-link" href="/">Collections</a>"#), "{body}");
+    assert!(!body.contains("aria-current"), "`/` is in no collection, so it marks none of them current: {body}");
+    assert!(body.contains(r#"<a class="collection" href="/wikipedia">wikipedia</a>"#), "the switcher still works: {body}");
+    assert!(body.contains(r#"<a class="collection" href="/wiktionary">wiktionary</a>"#), "{body}");
+
+    // The box does search a collection, so it says which one and carries it.
+    assert!(body.contains(r#"placeholder="Search Tiny wiki""#), "{body}");
+    assert!(body.contains(r#"<input type="hidden" name="c" value="wikipedia">"#), "{body}");
+    assert!(body.contains("Pick a collection, or search <strong>Tiny wiki</strong>"), "the teaching line is back: {body}");
+
+    // A collection's own home page is unchanged: branded for itself, current.
+    let body = body_text(get(&app, "/wiktionary").await).await;
+    assert!(body.contains(r#"<a class="home-link" href="/wiktionary">Tiny dictionary</a>"#), "{body}");
+    assert!(body.contains(r#"href="/wiktionary" aria-current="page""#), "{body}");
+}
+
 /// The switcher shows the **label**, the same token the URL carries, so
 /// what you click and where you land read alike. A collection whose library
 /// cannot be opened is named as failed and is not a link: every page under

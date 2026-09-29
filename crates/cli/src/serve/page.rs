@@ -76,7 +76,7 @@ fn collection_field(label: &str) -> String {
 /// carries, so what you click and where you land read alike, while the
 /// brand stays the header's own text. Nothing at all with one collection:
 /// there is nowhere to switch to.
-fn switcher(active: &Active) -> String {
+fn switcher(active: &Active, chrome: Chrome) -> String {
     if active.collections.len() < 2 {
         return String::new();
     }
@@ -86,7 +86,9 @@ fn switcher(active: &Active) -> String {
         .enumerate()
         .map(|(i, label)| {
             let failed = active.collections.at(i).is_some_and(|c| c.failure().is_some());
-            match (i == active.index, failed) {
+            // `/` is in none of them, so it marks none of them current.
+            let current = chrome != Chrome::Root && i == active.index;
+            match (current, failed) {
                 (true, false) => format!(r#"<a class="collection" href="/{label}" aria-current="page">{label}</a>"#),
                 // Current and failed: `/` marks it failed, and a switcher
                 // showing the one you are in as healthy while every link out
@@ -123,15 +125,24 @@ pub enum Chrome {
     /// home link and the search form point at `/` instead: every URL under
     /// this collection is another 503.
     Unavailable,
+    /// `/` with more than one collection loaded: the list belongs to the
+    /// process, not to whichever collection sorts first, so it is branded for
+    /// the process and the switcher marks nothing current. The search box
+    /// still names, and still searches, the default collection.
+    Root,
 }
 
 /// [`shell`] with the chrome named. Kept separate so the ten pages that
 /// belong to their collection say nothing about it.
 pub fn shell_with(page_title: &str, active: Option<&Active>, q: Option<&str>, body: &str, chrome: Chrome) -> String {
-    let scoped = active.filter(|_| chrome == Chrome::Inside);
+    let inside = active.filter(|_| chrome == Chrome::Inside);
+    // The collection the search box names and searches, which is the active
+    // one on every page including `/`; `home_text` is what the page itself is
+    // called, which on `/` is the process rather than that collection.
     let brand = active.map_or("Error", |a| a.brand());
-    let home = scoped.map_or_else(|| "/".to_string(), |a| a.base());
-    let label = scoped.map_or("", |a| a.label());
+    let home = inside.map_or_else(|| "/".to_string(), |a| a.base());
+    let home_text = if chrome == Chrome::Root { "Collections" } else { brand };
+    let label = active.filter(|_| chrome != Chrome::Unavailable).map_or("", |a| a.label());
 
     // One attribute is where app.js reads the active collection, so the
     // three requests it makes carry it too.
@@ -149,7 +160,7 @@ pub fn shell_with(page_title: &str, active: Option<&Active>, q: Option<&str>, bo
 <body>
 <header class="chrome">
 <form action="/search" method="get" class="searchbar" role="search">
-<a class="home-link" href="{home}">{collection_title}</a>
+<a class="home-link" href="{home}">{home_text}</a>
 {collection_input}<input type="text" name="q" id="search-input" value="{q}" placeholder="Search {collection_title}" aria-label="Search {collection_title}" autocomplete="off"
  aria-autocomplete="list" aria-expanded="false" role="combobox" aria-controls="suggestions">
 <button type="submit">Search all text</button>
@@ -176,9 +187,10 @@ pub fn shell_with(page_title: &str, active: Option<&Active>, q: Option<&str>, bo
 </body>
 </html>"#,
         page_title = esc(page_title),
+        home_text = esc(home_text),
         collection_title = esc(brand),
         q = esc(q.unwrap_or_default()),
-        switcher = active.map(switcher).unwrap_or_default(),
+        switcher = active.map(|a| switcher(a, chrome)).unwrap_or_default(),
         body = body,
     )
 }
@@ -226,7 +238,14 @@ pub fn collections_body(active: &Active) -> String {
     } else {
         format!(r#"<h2>Not loaded</h2><ul class="skipped">{skipped}</ul>"#)
     };
-    format!(r#"<section class="collections"><h1>Collections</h1><ul class="collection-list">{rows}</ul>{not_loaded}</section>"#)
+    // The same teaching line a collection's own home page carries, which this
+    // page dropped: the search box above works here too, on the collection it
+    // names, and the keys work on every page.
+    let hint = format!(
+        r#"<p class="hint">Pick a collection, or search <strong>{brand}</strong> from the box above. <span class="js-only">Press <kbd>?</kbd> for keys, <kbd>r</kbd> for a random article.</span></p>"#,
+        brand = esc(active.brand()),
+    );
+    format!(r#"<section class="collections"><h1>Collections</h1><ul class="collection-list">{rows}</ul>{not_loaded}{hint}</section>"#)
 }
 
 /// One "not loaded" row: the file's own name and the class of problem. Not

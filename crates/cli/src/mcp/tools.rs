@@ -188,16 +188,21 @@ pub(super) fn search_header(shown: usize, limit: usize, query: &str, collection:
         None => format!("\"{}\"", sanitize(query)),
     };
     if shown == 0 {
-        let mut header = format!("0 shown for {subject} — try different words, or fewer of them");
-        if let Some((names, verb)) = hint(elsewhere) {
-            header.push_str(&format!("; {names} {verb} a page with that exact title, call search with collection=\"{}\"", elsewhere[0]));
-        }
-        header
-    } else if shown == limit {
-        format!("{shown} shown for {subject} — more may exist, call search again with a higher limit")
-    } else {
-        format!("{shown} shown for {subject}")
+        // Either a next step or the other one, never both: "try different
+        // words" throws away the one string proved to resolve, and `search`
+        // is the wrong tool for a title that is already exact. Same shape as
+        // `not_found_message`, which got this right.
+        return match hint(elsewhere) {
+            Some((names, verb)) => {
+                format!("0 shown for {subject} — {names} {verb} a page with that exact title; call read with collection=\"{}\"", elsewhere[0])
+            }
+            None => format!("0 shown for {subject} — try different words, or fewer of them"),
+        };
     }
+    if shown == limit {
+        return format!("{shown} shown for {subject} — more may exist, call search again with a higher limit");
+    }
+    format!("{shown} shown for {subject}")
 }
 
 /// Without `section`: header, the lead's paragraph text (fenced), facts

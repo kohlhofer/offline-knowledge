@@ -847,7 +847,15 @@ fn a_miss_names_another_collection_that_has_the_title() {
 
     let header = tools::search_text(&scope, "Mercury", 8).unwrap();
     assert!(header.starts_with("0 shown for \"Mercury\" in wikipedia"), "{header}");
-    assert!(header.contains("wiktionary has a page with that exact title, call search with collection=\"wiktionary\""), "{header}");
+    // One next step, and the tool that can act on the string already proved
+    // to resolve: "try different words" would throw that string away, and
+    // `search` is the wrong call for a title that is exact next door.
+    assert!(header.contains("wiktionary has a page with that exact title; call read with collection=\"wiktionary\""), "{header}");
+    assert!(!header.contains("try different words"), "{header}");
+
+    // With no hint, the advice that is left is the only one there is.
+    let header = tools::search_text(&scope, "Zzznotathing", 8).unwrap();
+    assert!(header.contains("try different words, or fewer of them"), "{header}");
 
     // A prefix-only match is not a match, and neither is a title nobody has.
     let err = tools::read_text(&scope, "Merc", None, None).unwrap_err();
