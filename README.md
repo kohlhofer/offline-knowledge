@@ -1,6 +1,6 @@
 # offline-knowledge
 
-Wikipedia on your own disk, read in milliseconds. A keystroke brings up titles in 0.15 ms, a link opens a rendered article in about 5 ms, and a collection's index opens in under 7. One process holds as many collections as you give it, one of them active at a time, and there are three ways in: a terminal reader, a web UI, and an MCP server for agents. All three go through `ok-core`'s `Library`, so the numbers below apply whichever one you use.
+Wikipedia on your own disk, read in milliseconds. A keystroke brings up titles in 0.15 ms, a link opens a rendered article in about 5 ms, and a collection's index opens in about 7. One process holds as many collections as you give it, one of them active at a time, and there are three ways in: a terminal reader, a web UI, and an MCP server for agents. All three go through `ok-core`'s `Library`, so the numbers below apply whichever one you use.
 
 Every collection is a file you downloaded. Nothing is fetched while you read, no service answers the query, and the file stays the same until you replace it.
 
@@ -11,7 +11,7 @@ Every collection is a file you downloaded. Nothing is fetched while you read, no
 | Operation | p50 | p99 | max |
 | --- | --- | --- | --- |
 | Open the collection set | 0.04 ms | | |
-| Open that collection's index | 6.3 ms | | |
+| Open that collection's index | 7.3 ms | | |
 | Title suggestions (1 to 6 characters) | 0.15 ms | 13 ms | 14 ms |
 | Load and parse an article | 3.3 ms | 10 ms | 13 ms |
 | Lay out at 100 columns | 0.34 ms | 1.2 ms | 1.4 ms |
@@ -20,7 +20,7 @@ Every collection is a file you downloaded. Nothing is fetched while you read, no
 | Full-text search, a common word | 0.50 ms | 1.4 ms | 1.4 ms |
 | `GET /{collection}/{path}` over HTTP, cache miss (resolve + load + parse + render) | 3.7 ms | 12 ms | 20 ms |
 
-The first row is every collection's `meta.json`, which is all that loading a set reads; the second is the one collection a command actually uses. The terminal reader pays nothing beyond those two. Only `serve`, `mcp` and `bench --http` build a tokio runtime, so the reader and the one-shot commands (`ok suggest`, `ok search`, `ok show --json`) start, answer and exit. What a directory of collections costs at startup is under Collections below.
+The first row is every collection's `meta.json`, which is all that loading a set reads; the second is the one collection a command actually uses. That second row includes reading the ZIM's own `Scraper` metadata, about 1 ms on an index that predates `meta.json` recording it, and it is what keeps a file another scraper wrote from being read as mwoffliner's by whichever command opens it first. The terminal reader pays nothing beyond those two. Only `serve`, `mcp` and `bench --http` build a tokio runtime, so the reader and the one-shot commands (`ok suggest`, `ok search`, `ok show --json`) start, answer and exit. What a directory of collections costs at startup is under Collections below.
 
 The web UI costs the reader's numbers plus HTTP. A first visit to an article is the `GET /{collection}/{path}` row; a revisit costs about 0.2 ms, served from an LRU of rendered articles, keyed by collection and entry. Rendering was called too cheap to measure in an earlier pass, and it isn't. Fusing sanitize and HTML-escaping into one pass over the output buffer, then dropping the per-run temporary `String`s and per-heading `format!` calls, took Demographics of the United States (2.17 MB of source HTML, the largest article here) from 3.08 ms to 0.46, and Albert Einstein from 1.13 ms to 0.34. The output is byte-identical over 498 real articles.
 

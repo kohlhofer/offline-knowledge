@@ -192,11 +192,25 @@ impl Collection {
     pub fn library(&self) -> Result<Arc<Library>> {
         let opened = self
             .library
-            .get_or_init(|| Library::open(&self.zim_path).map(Arc::new).map_err(|e| Arc::from(e.to_string())));
+            .get_or_init(|| self.open_library().map(Arc::new).map_err(|e| Arc::from(e.to_string())));
         match opened {
             Ok(library) => Ok(Arc::clone(library)),
             Err(reason) => Err(Error::CollectionFailed { reason: reason.to_string() }),
         }
+    }
+
+    /// [`Library::open`] with the scraper gate on top. [`Self::load`] can only
+    /// apply that gate when the index recorded a scraper and [`Self::label`]
+    /// only when it resolves a label from the ZIM, so for a single collection
+    /// on an index that predates `IndexMeta.scraper` — which is every index
+    /// built before this version — neither ran: `ok suggest`, `search`, `show`
+    /// and `tui` read a sotoki or devdocs ZIM as mwoffliner's while `ok serve`
+    /// refused to start on it. The archive is open here either way, so this is
+    /// where the gate belongs.
+    fn open_library(&self) -> Result<Library> {
+        let library = Library::open(&self.zim_path)?;
+        check_scraper(&self.zim_path, library.archive().metadata("Scraper")?.as_deref())?;
+        Ok(library)
     }
 
     /// Whether [`Self::library`] has already opened this collection.

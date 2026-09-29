@@ -332,6 +332,46 @@ fn exact_elsewhere_names_the_other_collections_without_opening_a_library() {
     assert!(set.iter().all(|c| !c.is_open()), "the probe opens titles.fst, never a Library");
 }
 
+/// The gate that keeps one parser, one ranking and one renderer honest has to
+/// hold on the path a reader actually takes. `load` can only check the scraper
+/// when the index recorded one, and resolving a label only happens when
+/// something shows a label, so a single collection on an index that predates
+/// `IndexMeta.scraper` — every index built before this version — was read as
+/// mwoffliner's by `ok suggest`, `search`, `show` and `tui`, while `ok serve`
+/// refused to start on it.
+#[test]
+fn a_single_legacy_collection_still_refuses_a_zim_another_scraper_wrote() {
+    let dir = tempfile::tempdir().unwrap();
+    let sotoki = imported(dir.path(), "s.zim", "stack_en_all", "Stack Exchange", &["Question"]);
+    rewrite_meta(&sotoki, |m| {
+        m.name = None;
+        m.scraper = None;
+    });
+    // The same ZIM with only its `Scraper` changed, and changed to a string
+    // the same length, so the file's size and uuid still match its index:
+    // `Library::open`'s own check must not be what refuses this.
+    build(dir.path(), "s.zim", "stack_en_all", "Stack Exchange", Some("sotoki-zim 1.17.5"), &["Question"]);
+
+    // Alone, so nothing resolves its label: `open` and `resolve_labels` both
+    // keep it, exactly as they keep a ZIM carrying no `Name` at all.
+    let set = Collections::open(std::slice::from_ref(&sotoki), None, &[]).unwrap().resolve_labels().unwrap();
+    assert_eq!(set.len(), 1);
+
+    let err = set.default().library().err().unwrap().to_string();
+    assert!(err.contains("sotoki-zim 1.17.5"), "the refusal names the scraper it found: {err}");
+    assert!(!set.default().is_open());
+    assert_eq!(set.default().failure(), Some(err.as_str()), "and it is remembered, like any other failed open");
+
+    // A ZIM mwoffliner did write still opens, on the same legacy path.
+    let good = imported(dir.path(), "g.zim", "wikipedia_en_top", "Best of Wikipedia", &["Albert Einstein"]);
+    rewrite_meta(&good, |m| {
+        m.name = None;
+        m.scraper = None;
+    });
+    let set = Collections::open(std::slice::from_ref(&good), None, &[]).unwrap();
+    assert_eq!(set.default().library().unwrap().article_count(), 1);
+}
+
 /// The refusal runs before any work: a 90-second import must not end in
 /// "wrong scraper", and one parser, one ranking and one renderer are what
 /// restricting `ok` to mwoffliner's HTML buys.
