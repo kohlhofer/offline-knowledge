@@ -108,16 +108,24 @@ fn query_too_long(q: &str) -> bool {
     q.chars().count() > MAX_QUERY_CHARS
 }
 
-/// The collection a request names, falling back to the default. `?c=` is
-/// absent from every link earlier versions wrote and empty on a form a page
-/// left unfilled; a label that names nothing loaded is a stale bookmark,
-/// which the default answers rather than failing the page over.
-fn active<'a>(state: &'a AppState, wanted: Option<&str>) -> Active<'a> {
-    let index = wanted
-        .filter(|w| !w.is_empty())
-        .and_then(|w| index_of(state, w))
-        .unwrap_or_else(|| state.collections.default_index());
-    at(state, index)
+/// The collection a request names, or `None` when it names one that is not
+/// loaded. `?c=` is absent from every link earlier versions wrote and empty
+/// on a form a page left unfilled, so both of those are the default. A label
+/// that names nothing loaded is not: answering it from the default means a
+/// reader who asked one collection reads another under its brand, and on a
+/// set whose default has failed, `/search?q=x&c=typo` answers 503 about a
+/// collection the caller never named.
+fn active<'a>(state: &'a AppState, wanted: Option<&str>) -> Option<Active<'a>> {
+    match wanted.filter(|w| !w.is_empty()) {
+        Some(label) => index_of(state, label).map(|index| at(state, index)),
+        None => Some(default_active(state)),
+    }
+}
+
+/// The default collection's chrome, for a page that belongs to no collection
+/// of its own: `/`, and a 404 about a label that names nothing.
+fn default_active(state: &AppState) -> Active<'_> {
+    at(state, state.collections.default_index())
 }
 
 fn index_of(state: &AppState, label: &str) -> Option<usize> {
@@ -180,23 +188,28 @@ fn unavailable_html(active: &Active) -> Response {
     (StatusCode::SERVICE_UNAVAILABLE, [(header::CACHE_CONTROL, "no-store")], Html(body)).into_response()
 }
 
-/// A first path segment that is no collection's label. With exactly one
-/// collection loaded there is only one thing such a URL can mean — trimmed
-/// to its article, or written before collections existed — so `/{rest}`
-/// redirects to `/{label}/{rest}` rather than dead-ending. With more than
-/// one it names what is loaded, as the CLI and MCP both do; the default
-/// collection's chrome comes with it, so the reader has a way out.
-fn unknown_collection_html(state: &AppState, rest: &str, label: &str) -> Response {
-    if let [only] = &state.labels[..] {
-        let location = ok_core::html::article_href(&format!("/{only}"), rest, None);
-        return (StatusCode::FOUND, [(header::LOCATION, location), (header::CACHE_CONTROL, "no-store".to_string())]).into_response();
-    }
-    let active = active(state, None);
+/// A label that names no loaded collection, named back with what is loaded,
+/// as the CLI and MCP both do. The default collection's chrome comes with it,
+/// so the reader has a way out.
+fn unknown_collection_html(state: &AppState, label: &str) -> Response {
+    let active = default_active(state);
     let loaded = state.labels.iter().map(|l| l.as_str()).collect::<Vec<_>>().join(", ");
     let message = format!("There is no collection labeled \"{label}\" here. Loaded: {loaded}.");
     let body = page::shell("Not found", Some(&active), None, &page::error_body("404 Not Found", &message));
     (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-cache")], Html(body))
         .into_response()
+}
+
+/// A first path segment that is no collection's label. With exactly one
+/// collection loaded there is only one thing such a URL can mean — trimmed
+/// to its article, or written before collections existed — so `/{rest}`
+/// redirects to `/{label}/{rest}` rather than dead-ending.
+fn unknown_segment_html(state: &AppState, rest: &str, label: &str) -> Response {
+    if let [only] = &state.labels[..] {
+        let location = ok_core::html::article_href(&format!("/{only}"), rest, None);
+        return (StatusCode::FOUND, [(header::LOCATION, location), (header::CACHE_CONTROL, "no-store".to_string())]).into_response();
+    }
+    unknown_collection_html(state, label)
 }
 
 #[derive(Deserialize)]
@@ -207,7 +220,7 @@ pub struct HomeParams {
 /// `/`: the collection list when the process holds more than one, and that
 /// one collection's own home when it holds one.
 pub async fn home(State(state): State<AppState>, Query(params): Query<HomeParams>) -> Response {
-    let active = active(&state, None);
+    let active = default_active(&state);
     let (title, body) = if state.collections.len() > 1 {
         ("Collections".to_string(), page::collections_body(&active))
     } else {
@@ -227,7 +240,7 @@ pub async fn collection_home(
     if query_too_long(&label) {
         return bad_request_html(&format!("a path accepts at most {MAX_QUERY_CHARS} characters"));
     }
-    let Some(index) = index_of(&state, &label) else { return unknown_collection_html(&state, &label, &label) };
+    let Some(index) = index_of(&state, &label) else { return unknown_segment_html(&state, &label, &label) };
     let active = at(&state, index);
     // `failure()` is a `OnceLock::get`, so this page still opens no library:
     // it says nothing about a collection nothing has tried yet, and refuses
@@ -251,7 +264,9 @@ pub struct SearchParams {
 }
 
 pub async fn search(State(state): State<AppState>, Query(params): Query<SearchParams>) -> Response {
-    let active = active(&state, params.c.as_deref());
+    let Some(active) = active(&state, params.c.as_deref()) else {
+        return unknown_collection_html(&state, &params.c.unwrap_or_default());
+    };
     let q = params.q.unwrap_or_default();
     if query_too_long(&q) {
         return bad_request_html(&format!("the search box accepts at most {MAX_QUERY_CHARS} characters"));
@@ -293,7 +308,9 @@ pub struct SuggestParams {
 }
 
 pub async fn api_suggest(State(state): State<AppState>, Query(params): Query<SuggestParams>) -> Response {
-    let active = active(&state, params.c.as_deref());
+    let Some(active) = active(&state, params.c.as_deref()) else {
+        return unknown_collection_html(&state, &params.c.unwrap_or_default());
+    };
     let q = params.q.unwrap_or_default();
     if query_too_long(&q) {
         return (
@@ -398,7 +415,7 @@ pub async fn article(
         return bad_request_html(&format!("a path accepts at most {MAX_QUERY_CHARS} characters"));
     }
     let Some(index) = index_of(&state, &label) else {
-        return unknown_collection_html(&state, &format!("{label}/{path}"), &label);
+        return unknown_segment_html(&state, &format!("{label}/{path}"), &label);
     };
     let active = at(&state, index);
     // Cosmetic only (the banner below): an oversized value is ignored
@@ -469,7 +486,9 @@ pub struct RandomParams {
 }
 
 pub async fn random(State(state): State<AppState>, Query(params): Query<RandomParams>) -> Response {
-    let active = active(&state, params.c.as_deref());
+    let Some(active) = active(&state, params.c.as_deref()) else {
+        return unknown_collection_html(&state, &params.c.unwrap_or_default());
+    };
     let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
     let collections = Arc::clone(&state.collections);
     let index = active.index;

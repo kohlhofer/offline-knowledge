@@ -771,6 +771,33 @@ async fn search_suggest_and_random_take_their_collection_and_their_brand_from_c(
     assert!(location.starts_with("/wiktionary/"), "a random article stays in the collection asked for: {location}");
 }
 
+/// A `?c=` naming a collection that is not loaded used to be answered by the
+/// default, so `/search?q=einstein&c=wikipedi` returned "0 results for
+/// einstein" under the other collection's brand, and on a set whose default
+/// had failed it answered 503 about a collection the caller never named. The
+/// same label in a path segment 404s, and this is the same mistake.
+#[tokio::test]
+async fn an_unknown_c_names_what_is_loaded_instead_of_answering_from_the_default() {
+    let (_d, app) = app_two();
+
+    for uri in ["/search?q=einstein&c=wikipedi", "/api/suggest?q=alb&c=wikipedi", "/random?c=wikipedi"] {
+        let res = get(&app, uri).await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "{uri}");
+        let body = body_text(res).await;
+        assert!(body.contains("404 Not Found") && body.contains("wikipedi"), "{uri}: {body}");
+        assert!(body.contains("wikipedia, wiktionary"), "{uri}: and it names what is loaded: {body}");
+        assert!(!body.contains("0 results"), "{uri}: the query is not answered by another collection: {body}");
+    }
+
+    // Absent and empty still mean the default: every link written before `c=`
+    // existed carries neither, and a form a page left unfilled sends empty.
+    for uri in ["/search?q=einstein", "/search?q=einstein&c="] {
+        let res = get(&app, uri).await;
+        assert_eq!(res.status(), StatusCode::OK, "{uri}");
+        assert!(body_text(res).await.contains("Tiny wiki"), "{uri}");
+    }
+}
+
 /// With JavaScript off, a form is the only thing carrying the collection out
 /// of the page. Both server-rendered forms need the hidden field, or a
 /// reader on one collection searches another.
