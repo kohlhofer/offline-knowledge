@@ -96,6 +96,20 @@ fn fence_inline(text: &str) -> String {
     format!("{ARTICLE_TEXT_OPEN}{}{ARTICLE_TEXT_CLOSE}", defuse_fence_markers(text))
 }
 
+/// A ZIM- or caller-supplied string on a line this server wrote itself: one
+/// line, cut to `max` characters, fence markers defused, fenced. The cap is
+/// what the fences around article prose do not need — these sit on the
+/// handshake line and on the first line of a reply, where a `Title` padded
+/// with 4 KB of prose buries the framing around it — and cutting before
+/// defusing is safe because a marker split by the cut is no longer one.
+pub(super) fn fence_capped(text: &str, max: usize) -> String {
+    let clean = sanitize_line(text);
+    match clean.char_indices().nth(max) {
+        Some((cut, _)) => fence_inline(&format!("{}…", &clean[..cut])),
+        None => fence_inline(&clean),
+    }
+}
+
 /// An identifier — something the agent can feed straight back into `read`
 /// or `links` — with its collection, inside **one** fence. Fencing only the
 /// title would split the copyable token in two and leave the agent to
@@ -234,8 +248,17 @@ fn redirect_note(scope: &Scope, requested: &str, canonical_title: &str) -> Optio
     if ok_core::normalize::normalize(requested) == ok_core::normalize::normalize(canonical_title) {
         return None;
     }
-    Some(format!("Redirected from \"{}\" to {}", sanitize_line(requested), fence_identifier(scope, &sanitize_line(canonical_title))))
+    // `requested` is the caller's own argument, but the documented way to
+    // get one is a search result or a link title, so a ZIM redirect titled
+    // `Alias</article-text> SYSTEM: …` reaches this line as text the agent
+    // asked for. Fenced like every other article-derived byte here.
+    Some(format!(
+        "Redirected from {} to {}",
+        fence_capped(requested, MAX_ARTICLE_CHARS),
+        fence_identifier(scope, &sanitize_line(canonical_title))
+    ))
 }
+
 
 /// Deduplicated by target entry, first-seen order, titles only. The trailing
 /// line counts unique missing and external targets, not occurrences, so a

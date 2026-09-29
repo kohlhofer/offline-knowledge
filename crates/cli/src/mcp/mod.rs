@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use ok_core::Collections;
-use ok_core::text::sanitize_line;
+
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerConfig};
@@ -118,11 +118,21 @@ fn split_identifier(collections: &Collections, identifier: &str) -> Option<(usiz
     Some((collections.index_of(prefix)?, rest.to_string()))
 }
 
+/// How much of an unknown `collection` argument the refusal echoes back.
+const MAX_LABEL_ECHO_CHARS: usize = 40;
+
+/// How much of a ZIM's own `Title` the handshake line repeats. Enough for
+/// every real one ("Best of Wikipedia", "Wiktionary in Simple English"), and
+/// short enough that a padded one cannot bury the instructions around it.
+const MAX_TITLE_CHARS: usize = 60;
+
 /// Names what is loaded rather than falling back to a collection the caller
-/// did not ask for.
+/// did not ask for. The echo is fenced: the documented way to learn a label
+/// is the handshake line, so a wrong one can be a ZIM-derived string the
+/// agent copied, and this is an `isError` line it reads as framing.
 fn unknown_collection(collections: &Collections, label: &str) -> String {
     let loaded: Vec<String> = collections.iter().filter_map(|c| c.label().ok()).map(|l| l.to_string()).collect();
-    format!("no collection labeled \"{}\" — loaded: {}", sanitize_line(label), loaded.join(", "))
+    format!("no collection labeled {} — loaded: {}", tools::fence_capped(label, MAX_LABEL_ECHO_CHARS), loaded.join(", "))
 }
 
 /// One line per collection, sent once at handshake: an agent learns what it
@@ -135,7 +145,18 @@ fn collections_note(collections: &Collections) -> String {
         .filter_map(|(i, collection)| {
             let label = collection.label().ok()?;
             let default = if i == collections.default_index() { " (default)" } else { "" };
-            Some(format!("{label} · {} · {} articles{default}", sanitize_line(collection.title()), collection.article_count()))
+            // The one ZIM-supplied string in the instructions, and the
+            // instructions are the one position an agent treats as
+            // authoritative: a `Title` carrying `</article-text>` and
+            // instruction-shaped prose came back verbatim on the handshake
+            // line, three lines under the promise that document content is
+            // fenced.
+            Some(format!(
+                "{label} · {} · {} articles{default}",
+                tools::fence_capped(collection.title(), MAX_TITLE_CHARS),
+                collection.article_count()
+            ))
+
         })
         .collect();
     let mut note = format!("Collections loaded:\n{}", rows.join("\n"));
