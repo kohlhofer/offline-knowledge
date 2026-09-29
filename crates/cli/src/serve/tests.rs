@@ -918,8 +918,9 @@ async fn a_collection_taking_a_reserved_segment_is_skipped_and_the_rest_still_se
     assert!(body.contains("search.zim") && body.contains("not usable"), "`/` says the file went nowhere: {body}");
 
     // With nothing left to serve it is still an error, which is the half of
-    // the old behavior worth keeping.
-    let alone = Collections::open(&[squatter], None, RESERVED_SEGMENTS).unwrap().resolve_labels().err().unwrap().to_string();
+    // the old behavior worth keeping — and now an error at `open`, so a
+    // one-shot cannot quietly read a collection `serve` would refuse.
+    let alone = Collections::open(&[squatter], None, RESERVED_SEGMENTS).err().unwrap().to_string();
     assert!(alone.contains("search.zim") && alone.contains("reserved"), "{alone}");
 }
 

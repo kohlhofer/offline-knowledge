@@ -266,6 +266,47 @@ fn open_resolves_no_label_and_resolve_labels_is_where_an_unusable_one_is_dropped
     assert_eq!(set.resolve_labels().unwrap().len(), 1, "idempotent");
 }
 
+/// `default()` has to name the same collection whichever frontend asks.
+/// `open` left a label nothing could route in place while `resolve_labels`
+/// dropped it, so `ok suggest`, `search` and `show` answered from a file
+/// `ok collections`, `serve`, `mcp` and `tui` all skipped — and the label a
+/// URL would have used belonged to someone else entirely.
+#[test]
+fn the_default_is_the_same_collection_whether_or_not_every_label_was_resolved() {
+    let dir = tempfile::tempdir().unwrap();
+    let squatter = imported(dir.path(), "a.zim", "wiki_en_all", "Squatter", &["Query"]);
+    let good = imported(dir.path(), "m.zim", "wikipedia_en_top", "Best of Wikipedia", &["Albert Einstein"]);
+    let gone = imported(dir.path(), "z.zim", "wiktionary_en-simple_all", "Wiktionary", &["Mercury"]);
+
+    // A label `meta.json` already records costs nothing to judge, so `open`
+    // judges it rather than leaving it to the pass a one-shot never runs.
+    let cheap = Collections::open(&[squatter.clone(), good.clone(), gone.clone()], None, &["wiki"]).unwrap();
+    assert_eq!(cheap.len(), 2);
+    assert_eq!(cheap.skipped()[0].path, squatter);
+    assert_eq!(cheap.default().zim_path(), good, "the one-shot lands where a routed frontend does");
+    let resolved = Collections::open(&[squatter.clone(), good.clone(), gone.clone()], None, &["wiki"]).unwrap();
+    assert_eq!(resolved.resolve_labels().unwrap().default().zim_path(), good);
+
+    // And on the path every index in the wild is on, where `meta.json`
+    // records no label and reading one costs a ZIM open: the default
+    // resolves labels forward and stops at the first it could route to.
+    for zim in [&squatter, &good, &gone] {
+        rewrite_meta(zim, |m| {
+            m.name = None;
+            m.scraper = None;
+        });
+    }
+    let bytes = std::fs::read(&gone).unwrap();
+    std::fs::remove_file(&gone).unwrap();
+    let legacy = Collections::open(&[squatter, good.clone(), gone.clone()], None, &["wiki"]).unwrap();
+    assert_eq!(legacy.len(), 3, "nothing is dropped here: judging those labels costs a ZIM open each");
+    assert_eq!(legacy.default().zim_path(), good, "but the default is still one a URL can name");
+    assert_eq!(legacy.default_index(), 1);
+
+    std::fs::write(&gone, &bytes).unwrap();
+    assert!(legacy.at(2).unwrap().label().is_ok(), "the label past the default was never read: one label, not N");
+}
+
 /// An index written before `IndexMeta` carried `name` and `scraper` reads
 /// them from the ZIM instead, once, when something asks for a label.
 /// Bumping the index format would have forced a re-import of a 2.1 GB file,

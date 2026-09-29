@@ -180,6 +180,14 @@ impl Collection {
         self.label.get_or_init(|| self.read_label().map_err(|e| (Arc::from(e.to_string()), SkipKind::of(&e))))
     }
 
+    /// The same, for whoever has already resolved it, resolving nothing:
+    /// `meta.json` records a label for free, and an index that predates the
+    /// field costs a ZIM open to get one, so the pass in
+    /// [`Collections::open`] judges the first kind and leaves the second.
+    fn known_label(&self) -> Option<&std::result::Result<Label, (Arc<str>, SkipKind)>> {
+        self.label.get()
+    }
+
     fn read_label(&self) -> Result<Label> {
         let archive = Archive::open(&self.zim_path)?;
         check_scraper(&self.zim_path, archive.metadata("Scraper")?.as_deref())?;
@@ -336,13 +344,17 @@ impl Collections {
     /// file is the normal case, and one new file must not stop the rest from
     /// serving. Only an empty result is an error.
     ///
-    /// No label is resolved here unless `default_label` names one. On an
-    /// index that predates `IndexMeta.name` — which is every index built
-    /// before this version, including the 2.1 GB one that cannot be rebuilt
-    /// while a server reads it — a label costs an `Archive::open` and a
+    /// No label is read here unless `default_label` names one. On an index
+    /// that predates `IndexMeta.name` — which is every index built before
+    /// this version, including the 2.1 GB one that cannot be rebuilt while a
+    /// server reads it — a label costs an `Archive::open` and a
     /// metadata-cluster decompression, 1.1 to 1.7 ms per file, and
     /// `ok suggest` shows no label at all. [`Self::resolve_labels`] is where
     /// a frontend that does shows asks for them.
+    ///
+    /// The labels `meta.json` already carries are judged here, though, since
+    /// judging them reads nothing: a collection no frontend that routes
+    /// labels would keep must not be one `ok suggest` silently reads from.
     pub fn open(paths: &[PathBuf], default_label: Option<&str>, reserved: &[&str]) -> Result<Collections> {
         let reserved: Vec<Box<str>> = reserved.iter().map(|&segment| Box::from(segment)).collect();
         let mut collections = Vec::new();
@@ -353,18 +365,17 @@ impl Collections {
                 Err(e) => skipped.push(Skipped::new(path, &e)),
             }
         }
+        collections = keep_usable_labels(collections, &mut skipped, &reserved, false);
+        non_empty(&collections, &skipped)?;
         let default_index = match default_label {
             // Finding a named label forces every label anyway, so the
             // uniqueness check is free here and the set arrives resolved.
             Some(wanted) => {
-                collections = keep_usable_labels(collections, &mut skipped, &reserved);
+                collections = keep_usable_labels(collections, &mut skipped, &reserved, true);
                 non_empty(&collections, &skipped)?;
                 index_of_label(&collections, wanted, &skipped)?
             }
-            None => {
-                non_empty(&collections, &skipped)?;
-                0
-            }
+            None => 0,
         };
         Ok(Collections { collections, skipped, default_index, reserved })
     }
@@ -377,7 +388,7 @@ impl Collections {
     /// Free the second time: labels are cached, and a set that has been
     /// through this has nothing left to drop.
     pub fn resolve_labels(mut self) -> Result<Collections> {
-        self.collections = keep_usable_labels(std::mem::take(&mut self.collections), &mut self.skipped, &self.reserved);
+        self.collections = keep_usable_labels(std::mem::take(&mut self.collections), &mut self.skipped, &self.reserved, true);
 
         non_empty(&self.collections, &self.skipped)?;
         // `default_index` is either 0, or an index into a set this already
@@ -416,14 +427,30 @@ impl Collections {
         self.collections.iter().position(|c| c.label().is_ok_and(|l| l.as_str() == label))
     }
 
-    /// The collection a request that names none lands in: the first loaded,
-    /// or the one `--collection` named.
+    /// The collection a request that names none lands in: the one
+    /// `--collection` named, or the first in load order carrying a label a
+    /// frontend could route to.
     pub fn default(&self) -> &Collection {
-        &self.collections[self.default_index]
+        &self.collections[self.default_index()]
     }
 
+    /// Resolving forward and stopping at the first usable label is what
+    /// makes this the same answer before and after [`Self::resolve_labels`]
+    /// without paying for every label. That pass drops an unusable or
+    /// reserved one, so a set that has not been through it would otherwise
+    /// default to a collection `serve`, `mcp`, `tui` and `ok collections`
+    /// all skip, and `ok suggest` would answer from it. At most one label is
+    /// read, and on a set already resolved none is.
     pub fn default_index(&self) -> usize {
-        self.default_index
+        let from = self.default_index;
+        self.collections[from..]
+            .iter()
+            .position(|collection| collection.resolved_label().as_ref().is_ok_and(|label| !is_reserved(&self.reserved, label)))
+            // Nothing carries a label a frontend could route to, so the
+            // collection named keeps the place: one alone is kept whatever
+            // its `Name` says, which is what `ok tui` on a ZIM carrying none
+            // has always been.
+            .map_or(from, |offset| from + offset)
     }
 
     pub fn skipped(&self) -> &[Skipped] {
@@ -452,10 +479,20 @@ fn non_empty(collections: &[Collection], skipped: &[Skipped]) -> Result<()> {
     Ok(())
 }
 
+/// Whether a label is a first path segment a frontend's own routes own.
+fn is_reserved(reserved: &[Box<str>], label: &Label) -> bool {
+    reserved.iter().any(|segment| **segment == *label.as_str())
+}
+
 /// Drops every collection whose label is unusable, already taken, or one a
 /// frontend's own routes own, naming it in `skipped`. The first file loaded
 /// keeps a contested label.
-fn keep_usable_labels(loaded: Vec<Collection>, skipped: &mut Vec<Skipped>, reserved: &[Box<str>]) -> Vec<Collection> {
+///
+/// With `resolve` off only the labels an index already recorded are judged
+/// and nothing is read: that is [`Collections::open`]'s pass, where paying
+/// 1.1 to 1.7 ms a file for a label a one-shot never shows is exactly the
+/// cost [`Collections::resolve_labels`] exists to defer.
+fn keep_usable_labels(loaded: Vec<Collection>, skipped: &mut Vec<Skipped>, reserved: &[Box<str>], resolve: bool) -> Vec<Collection> {
     // One collection whose label cannot be resolved at all is kept: nothing
     // can collide with it, no frontend shows a single collection's label, and
     // `ok tui` and `ok mcp` have always worked on a ZIM carrying no `Name`
@@ -464,13 +501,20 @@ fn keep_usable_labels(loaded: Vec<Collection>, skipped: &mut Vec<Skipped>, reser
     let alone = loaded.len() == 1;
     let mut kept: Vec<Collection> = Vec::new();
     for collection in loaded {
-        let label = match collection.resolved_label() {
-            Ok(label) => label.clone(),
-            Err(_) if alone => {
+        let known = if resolve { Some(collection.resolved_label()) } else { collection.known_label() };
+        let label = match known {
+            // Nothing is known about this one yet, and reading it is what
+            // this pass was told not to do.
+            None => {
                 kept.push(collection);
                 continue;
             }
-            Err((reason, kind)) => {
+            Some(Ok(label)) => label.clone(),
+            Some(Err(_)) if alone => {
+                kept.push(collection);
+                continue;
+            }
+            Some(Err((reason, kind))) => {
                 skipped.push(Skipped::from_label(&collection.zim_path, reason, kind.clone()));
                 continue;
             }
@@ -480,12 +524,14 @@ fn keep_usable_labels(loaded: Vec<Collection>, skipped: &mut Vec<Skipped>, reser
         // a directory of good ones would otherwise take every collection
         // down with it. A set left with nothing to serve is still an error,
         // from `non_empty` above.
-        if reserved.iter().any(|segment| **segment == *label.as_str()) {
+        if is_reserved(reserved, &label) {
             let reason = format!("the label \"{label}\" is a reserved route segment");
             skipped.push(Skipped { path: collection.zim_path.clone(), reason, kind: SkipKind::Unusable });
             continue;
         }
-        match kept.iter().find(|k| k.label().is_ok_and(|kept| *kept == label)) {
+        // `known_label`, not `label`: every collection kept above either has
+        // its label cached already or is one this pass was told not to read.
+        match kept.iter().find(|k| k.known_label().is_some_and(|l| l.as_ref().is_ok_and(|kept| *kept == label))) {
             Some(first) => {
                 let reason = format!("the label \"{label}\" is already taken by {}", show_path(&first.zim_path));
                 let winner = first.zim_path.file_name().unwrap_or(first.zim_path.as_os_str()).to_string_lossy().to_string();
