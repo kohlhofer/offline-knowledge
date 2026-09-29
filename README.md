@@ -98,7 +98,7 @@ container run -it --rm --network offline -v "$PWD/data:/data" offline-knowledge:
 container run -it --rm --network offline -p 127.0.0.1:8080:8080 -v "$PWD/data:/data" offline-knowledge:dev serve --bind 0.0.0.0:8080
 ```
 
-The image is Debian 13 slim plus the `ok` binary, with `OK_ZIM=/data`, so every imported ZIM on the mount is a collection and the first filename is the default. `ok mcp` talks stdio, so it runs through `container exec -i <container> ok mcp` rather than a published port. The import has only run on the Mac so far. It writes the index next to the ZIM in `data/`, which the container reads through the mount.
+The image is Debian 13 slim plus the `ok` binary, with `OK_ZIM=/data`, so every imported ZIM on the mount is a collection, and `OK_COLLECTION=wikipedia`, so the default is pinned rather than left to load order: a ZIM dropped into `/data` whose filename sorts first would otherwise take over the home page, the brand and every request that names no collection. Set `OK_COLLECTION` to another label to change it; with nothing on the mount carrying that label the process says which labels it did load and stops, rather than guessing one. `ok mcp` talks stdio, so it runs through `container exec -i <container> ok mcp` rather than a published port. The import has only run on the Mac so far. It writes the index next to the ZIM in `data/`, which the container reads through the mount.
 
 ## Keys
 

@@ -26,11 +26,16 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM debian:trixie-slim
 COPY --from=build /usr/local/bin/ok /usr/local/bin/ok
-# Every imported *.zim directly inside /data is a collection, the first
-# filename being the default; OK_COLLECTION=<label> picks another one.
+# Every imported *.zim directly inside /data is a collection. The default is
+# pinned rather than left to load order: without OK_COLLECTION the first
+# filename wins, so a ZIM dropped into /data that sorts before the pinned one
+# would take over the home page, the brand and every unqualified request.
+# OK_COLLECTION=<label> is how you change it, and `ok collections` prints the
+# labels on the mount.
 ENV LANG=C.UTF-8 \
     TERM=xterm-256color \
-    OK_ZIM=/data
+    OK_ZIM=/data \
+    OK_COLLECTION=wikipedia
 WORKDIR /data
 EXPOSE 8080
 ENTRYPOINT ["ok"]
