@@ -14,6 +14,13 @@ pub fn normalize(s: &str) -> String {
             space = !out.is_empty();
             continue;
         }
+        // No title contains one, and left in, a control byte becomes part of
+        // a key or of a lookup bound: a `\0` in a query collided with the
+        // separator `titles.fst` puts between a key and its entry index.
+        if c.is_control() {
+            continue;
+        }
+
         if space {
             out.push(' ');
             space = false;
@@ -44,6 +51,15 @@ mod tests {
         assert_eq!(normalize("ÉCOLE"), "ecole");
         assert_eq!(normalize("ﬁsh"), "fish");
         assert_eq!(normalize(""), "");
+    }
+
+    /// No title carries one, and left in, a control byte becomes part of an
+    /// index key or of a lookup bound.
+    #[test]
+    fn drops_control_characters_but_still_treats_a_newline_as_a_space() {
+        assert_eq!(normalize("Pacman\0"), "pacman");
+        assert_eq!(normalize("Pac\u{1b}[2Jman"), "pac[2jman");
+        assert_eq!(normalize("Einstein\nSyndrome"), "einstein syndrome");
     }
 
     #[test]

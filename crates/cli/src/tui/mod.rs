@@ -448,7 +448,8 @@ impl App {
     /// Enter in the picker. The collection already active changes nothing.
     /// Another one takes the open article and both history stacks with it: a
     /// `Place` remembers an entry index, and an entry index means a
-    /// different article in a different ZIM.
+    /// different article in a different ZIM. The query survives, because the
+    /// hint that sends a reader here names the word they just typed.
     fn switch_to(&mut self, index: usize) {
         if index == self.active {
             return;
@@ -461,14 +462,24 @@ impl App {
                 return;
             }
         };
+        let cleared = self.article.is_some() || !self.back.is_empty() || !self.forward.is_empty();
         self.active = index;
         self.library = library;
         self.article = None;
         self.back.clear();
         self.forward.clear();
         self.screen = Screen::Search;
-        self.set_query(String::new());
-        self.status = "history cleared".into();
+        // The status bar's fixed segment already leads with the label, so
+        // this says what changed and nothing else: the loss is only worth a
+        // word when there was something to lose, and a switch from an empty
+        // reader reports the collection it landed in instead.
+        self.status = match cleared {
+            true => "history cleared".to_string(),
+            false => format!("{} articles", self.library.article_count()),
+        };
+        // After the status line, because a failing suggest replaces it.
+        let query = std::mem::take(&mut self.query);
+        self.set_query(query);
     }
 
     fn follow_selected(&mut self) {
@@ -484,7 +495,9 @@ impl App {
                 None => self.status = format!("no section \"{fragment}\" here"),
             },
             Link::Missing { path } => {
-                let miss = format!("\"{}\" is not in this collection", path.replace('_', " "));
+                // Percent-decoded ZIM text on its way to a terminal line, the
+                // same rule the `External` arm below has always followed.
+                let miss = format!("\"{}\" is not in this collection", layout::sanitize(&path.replace('_', " ")));
                 let elsewhere = self.elsewhere(&path);
                 self.status = match hint(&elsewhere) {
                     Some(hint) => format!("{miss} · {hint}"),

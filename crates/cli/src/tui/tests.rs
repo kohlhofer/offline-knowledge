@@ -57,6 +57,47 @@ fn app() -> (tempfile::TempDir, App) {
     (dir, app_over(&[zim]))
 }
 
+/// A missing link's path is percent-decoded ZIM text, so it reaches the
+/// status line the way an article's own prose does, and an ESC in it is an
+/// escape sequence on a terminal. The `External` arm below it has always
+/// sanitized; this one did not. `\0` in a query is refused outright, one
+/// layer down: `has_exact` used to append it to a lookup bound where it
+/// collided with the title index's own separator, so `Pacman\0` matched
+/// `Pacman` and fired a hint linking to a path nothing can resolve.
+#[test]
+fn a_missing_links_path_is_sanitized_before_it_reaches_the_status_line() {
+    let (_d, mut app) = app_of(
+        ZimBuilder::new()
+            .article(
+                "Start",
+                "Start",
+                &page("Start", r#"<p>A <a href="No%1B%5B2Jwhere">missing one</a> and a <a href="Pacman%00">null one</a>.</p>"#),
+            )
+            .metadata("Title", "Tiny")
+            .metadata("Scraper", "mwoffliner 1.17.5")
+            .build(),
+    );
+
+    type_text(&mut app, "start");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Enter);
+    assert!(app.status.contains("not in this collection"), "{}", app.status);
+    assert!(!app.status.contains('\u{1b}'), "an ESC from a ZIM href must not reach the terminal: {:?}", app.status);
+
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Enter);
+    assert!(!app.status.contains('\0'), "nor a null: {:?}", app.status);
+}
+
+/// An `App` over one imported ZIM written from `bytes`: for a test needing a
+/// specific href or body the shared fixture's other assertions would notice.
+fn app_of(bytes: Vec<u8>) -> (tempfile::TempDir, App) {
+    let dir = tempfile::tempdir().unwrap();
+    let zim = imported(dir.path(), "t.zim", bytes);
+    (dir, app_over(&[zim]))
+}
+
 /// Writes a ZIM and imports it, as `ok import` would.
 fn imported(dir: &std::path::Path, file: &str, bytes: Vec<u8>) -> std::path::PathBuf {
     let zim = dir.join(file);
@@ -467,11 +508,70 @@ fn enter_on_another_collection_switches_and_clears_the_history() {
 
     assert!(app.back.is_empty() && app.forward.is_empty(), "both stacks held entry indices from the other ZIM");
 
+    // The query came across and was re-run here, so "alb" has no match in the
+    // dictionary and says so, rather than being silently emptied.
+    assert_eq!(app.query, "alb");
+    assert!(app.suggestions.is_empty(), "and only from the collection now active: {:?}", app.suggestions);
+
+    app.set_query(String::new());
     type_text(&mut app, "merc");
     assert_eq!(app.suggestions[0].title, "Mercury", "suggestions come from the collection now active");
-    type_text(&mut app, "zzz");
-    app.set_query("alb".into());
-    assert!(app.suggestions.is_empty(), "and only from it: {:?}", app.suggestions);
+}
+
+/// Ctrl-T is global and needs no article, so the picker had to render at any
+/// size the terminal happens to be: `(rows + 2).clamp(3, area.height - 2)`
+/// had `min > max` on a body four rows or shorter, which a 70x5 terminal
+/// reached with Ctrl-T from launch (`min > max`, exit 101). The outline's
+/// `clamp(8, ...)` has the same shape below ten rows. Both fall back to the
+/// area they were given.
+#[test]
+fn the_picker_and_the_outline_render_at_every_terminal_size() {
+    let (_d, mut app) = two_collections();
+    // Wide enough to want a centred popup, short enough to have no room for
+    // one: the combination that panicked.
+    for (w, h) in [(70u16, 5u16), (70, 6), (70, 9), (70, 10), (20, 3), (200, 60)] {
+        app.resize(w, h);
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+
+        ctrl(&mut app, 't');
+        assert!(matches!(app.overlay, Overlay::Collections(_)), "{w}x{h}");
+        terminal.draw(|f| render::draw(f, &mut app)).unwrap();
+        press(&mut app, KeyCode::Esc);
+
+        press(&mut app, KeyCode::Char('?'));
+        terminal.draw(|f| render::draw(f, &mut app)).unwrap();
+        press(&mut app, KeyCode::Esc);
+
+        app.set_query("alb".into());
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('o'));
+        terminal.draw(|f| render::draw(f, &mut app)).unwrap();
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Esc);
+    }
+}
+
+/// The miss hint names the word it is about, so a switch has to carry it:
+/// `switch_to` used to empty the query, and the reader had to retype the very
+/// thing the hint had just told them existed next door.
+#[test]
+fn a_switch_carries_the_query_the_miss_hint_was_about() {
+    let (_d, mut app) = two_collections();
+    type_text(&mut app, "Venus");
+    press(&mut app, KeyCode::Tab);
+    assert!(app.status.contains("wiktionary has it (Ctrl-T)"), "{}", app.status);
+
+    ctrl(&mut app, 't');
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+
+    assert_eq!(app.query, "Venus", "the word the hint was about does not have to be retyped");
+    assert_eq!(app.suggestions[0].title, "Venus", "and the suggestion was re-run in the collection switched to");
+    // Nothing was open or stacked, so nothing was cleared and the line says
+    // what it landed in instead.
+    assert!(!app.status.contains("history cleared"), "{}", app.status);
+    let text = screen(&mut app);
+    assert!(text.contains(" wiktionary · search · 2 articles"), "{text}");
 }
 
 /// Enter on the collection already active is not a switch, so it clears
@@ -502,15 +602,25 @@ fn with_one_collection_ctrl_t_does_nothing_and_the_status_bar_is_unchanged() {
     assert!(!text.contains("Ctrl-T collections"), "the opening status line does not offer it either: {text}");
 }
 
+/// Both directions: `open_collections` returns silently with one collection
+/// loaded, and a help dialog that advertises a key which does nothing is
+/// worse than one that says less.
 #[test]
-fn the_help_overlay_lists_ctrl_t() {
-    let (_d, mut app) = two_collections();
+fn the_help_overlay_lists_ctrl_t_only_when_there_is_somewhere_to_switch_to() {
+    let (_d, mut two) = two_collections();
     // Tall enough for the whole table: the popup is 70% of the screen and
     // clips the rows past it.
+    two.resize(120, 44);
+    press(&mut two, KeyCode::Char('?'));
+    let text = screen(&mut two);
+    assert!(text.contains("Ctrl-T"), "{text}");
+
+    let (_d, mut app) = app();
     app.resize(120, 44);
     press(&mut app, KeyCode::Char('?'));
     let text = screen(&mut app);
-    assert!(text.contains("Ctrl-T"), "{text}");
+    assert!(!text.contains("Ctrl-T"), "one collection: nothing to switch to, so nothing to advertise: {text}");
+    assert!(text.contains("random article"), "and the rest of the dialog is still there: {text}");
 }
 
 #[test]

@@ -21,7 +21,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         Overlay::None => {}
         Overlay::Outline(state) => outline(frame, app, body, state),
         Overlay::Collections(state) => collections(frame, app, body, state),
-        Overlay::Help => help(frame, body),
+        Overlay::Help => help(frame, app, body),
     }
 }
 
@@ -197,13 +197,7 @@ fn outline(frame: &mut Frame<'_>, app: &App, area: Rect, state: &Outline) {
         })
         .max()
         .unwrap_or(0);
-    let popup = if area.width < 70 {
-        area
-    } else {
-        let width = (widest as u16 + 4).clamp(40, area.width.saturating_sub(4));
-        let height = (sections.len() as u16 + 4).clamp(8, area.height.saturating_sub(2));
-        Rect { x: area.x + (area.width - width) / 2, y: area.y + (area.height - height) / 2, width, height }
-    };
+    let popup = popup(area, widest as u16 + 4, sections.len() as u16 + 4, 8);
     frame.render_widget(Clear, popup);
     let title = format!(" Outline · {} of {} ", state.matches.len(), sections.len());
     let block = Block::new()
@@ -280,13 +274,7 @@ fn collections(frame: &mut Frame<'_>, app: &App, area: Rect, state: &CollectionP
         })
         .collect();
     let widest = rows.iter().map(|(l, t, s)| 2 + laid::display_width(l) + 3 + laid::display_width(t) + laid::display_width(s)).max().unwrap_or(0);
-    let popup = if area.width < 70 {
-        area
-    } else {
-        let width = (widest as u16 + 4).clamp(40, area.width.saturating_sub(4));
-        let height = (rows.len() as u16 + 2).clamp(3, area.height.saturating_sub(2));
-        Rect { x: area.x + (area.width - width) / 2, y: area.y + (area.height - height) / 2, width, height }
-    };
+    let popup = popup(area, widest as u16 + 4, rows.len() as u16 + 2, 3);
     frame.render_widget(Clear, popup);
     let block = Block::new()
         .borders(Borders::ALL)
@@ -316,7 +304,7 @@ fn collections(frame: &mut Frame<'_>, app: &App, area: Rect, state: &CollectionP
     frame.render_stateful_widget(widget, inner, &mut list_state);
 }
 
-fn help(frame: &mut Frame<'_>, area: Rect) {
+fn help(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let rows = [
         ("Search", ""),
         ("type", "suggest titles as you type"),
@@ -339,6 +327,9 @@ fn help(frame: &mut Frame<'_>, area: Rect) {
     ];
     let lines: Vec<Line<'_>> = rows
         .iter()
+        // Ctrl-T does nothing with one collection loaded, and a help dialog
+        // that advertises a dead key is worse than one that says less.
+        .filter(|(k, _)| *k != "Ctrl-T" || app.collections.len() > 1)
         .map(|(k, v)| {
             if v.is_empty() {
                 Line::from(Span::styled(*k, Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)))
@@ -350,6 +341,22 @@ fn help(frame: &mut Frame<'_>, area: Rect) {
     let popup = centered(area, 70, 70);
     frame.render_widget(Clear, popup);
     frame.render_widget(Paragraph::new(lines).block(Block::new().borders(Borders::ALL).title(" Keys · any key closes ")), popup);
+}
+
+/// A centred overlay `wanted` big, never smaller than `min_height` and never
+/// larger than the room it has, and `area` itself when there is no room for
+/// one at all. `Rect`'s arithmetic is unsigned throughout, so an overlay
+/// taller than its area is a panic rather than a spill: the picker's own
+/// `clamp(3, area.height - 2)` had `min > max` on any terminal five rows or
+/// shorter, which Ctrl-T reached from launch at 70x5 (exit 101), and the
+/// outline's `clamp(8, ...)` has the same shape below ten.
+fn popup(area: Rect, wanted_width: u16, wanted_height: u16, min_height: u16) -> Rect {
+    if area.width < 70 || area.height < min_height + 2 {
+        return area;
+    }
+    let width = wanted_width.clamp(40, area.width.saturating_sub(4));
+    let height = wanted_height.clamp(min_height, area.height.saturating_sub(2));
+    Rect { x: area.x + (area.width - width) / 2, y: area.y + (area.height - height) / 2, width, height }
 }
 
 fn inset(area: Rect) -> Rect {

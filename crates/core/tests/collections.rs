@@ -322,6 +322,13 @@ fn exact_elsewhere_names_the_other_collections_without_opening_a_library() {
     assert!(set.exact_elsewhere(1, "Mercury").is_empty(), "a collection is never its own hint");
     assert!(set.exact_elsewhere(0, "Merc").is_empty(), "a prefix-only match must not fire the hint");
     assert!(set.exact_elsewhere(0, "Nothing at all").is_empty());
+    // A control character is not part of any title. Left in, a `\0` became
+    // part of the lookup bound, where it collided with the separator the
+    // title index puts between a key and its entry: `Mercury\0` matched
+    // `Mercury` and fired a hint whose link was the caller's own unusable
+    // path (`/wiktionary/Mercury%00`).
+    assert!(set.exact_elsewhere(0, "Mercury\0").is_empty(), "a null in the query is not an exact title");
+    assert!(set.exact_elsewhere(0, "Mercury\u{1b}[2J").is_empty());
     assert!(set.iter().all(|c| !c.is_open()), "the probe opens titles.fst, never a Library");
 }
 

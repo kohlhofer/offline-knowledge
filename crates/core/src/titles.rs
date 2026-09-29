@@ -75,10 +75,18 @@ impl TitleIndex {
     /// key sharing the prefix, which is right for typing and wasteful for
     /// an existence check.
     pub fn has_exact(&self, query: &str) -> bool {
+        // A control character is not part of any title, and `normalize` drops
+        // it, which would otherwise make "Pacman\0" an exact match for
+        // "Pacman" and fire a hint whose link is the caller's own unusable
+        // path (`/wikipedia/Pacman%00`, a 404 next door too).
+        if query.chars().any(char::is_control) {
+            return false;
+        }
         let normalized = normalize(query);
         if normalized.is_empty() {
             return false;
         }
+
         let mut bound = normalized.into_bytes();
         bound.push(0);
         self.map.range().ge(&bound).into_stream().next().is_some_and(|(key, _)| key.starts_with(&bound))
