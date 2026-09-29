@@ -10,6 +10,9 @@
 #   # the MCP server, over stdio via `container exec` rather than a published port:
 #   container exec -i <container> ok mcp
 #
+#   # what loaded, what did not:
+#   container exec -i <container> ok collections
+#
 # The ZIM file and its .okx index live in the mounted /data directory.
 
 FROM rust:1-slim-trixie AS build
@@ -23,9 +26,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM debian:trixie-slim
 COPY --from=build /usr/local/bin/ok /usr/local/bin/ok
+# Every imported *.zim directly inside /data is a collection, the first
+# filename being the default; OK_COLLECTION=<label> picks another one.
 ENV LANG=C.UTF-8 \
     TERM=xterm-256color \
-    OK_ZIM=/data/wikipedia_en_top_nopic_2026-06.zim
+    OK_ZIM=/data
 WORKDIR /data
 EXPOSE 8080
 ENTRYPOINT ["ok"]

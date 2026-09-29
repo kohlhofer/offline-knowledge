@@ -12,7 +12,9 @@ author's engineering knowledge base.
 - `crates/core` (`ok-core`): import (title FST, section redirects, inbound links,
   Tantivy full text), the document model, `html.rs` (Document→HTML, the one place
   that renders ZIM content back into markup), `text::sanitize` (shared control-character
-  stripping), and `Library`, the API every frontend uses.
+  stripping), `Library`, the API every frontend uses, and `collections.rs`, the set of
+  imported ZIMs with one active at a time (a `Library` per collection, opened on first
+  use; the only cross-collection call is an exact-title existence probe for a miss hint).
 - `crates/cli` (`ok`): the binary. `import`, `tui` (default), `suggest`, `search`,
   `show`, `bench` (`--http` benches `serve` on an ephemeral port), `serve` (the web UI,
   `axum`), `mcp` (three tools over stdio, `rmcp`).
@@ -32,7 +34,11 @@ cargo test                            # all crates
 cargo build --release -p ok
 ./target/release/ok --zim data/wikipedia_en_top_nopic_2026-06.zim import
 ./target/release/ok --zim data/wikipedia_en_top_nopic_2026-06.zim bench
+./target/release/ok --zim data/ collections   # several collections at once, one active
 ```
+
+`--zim` repeats and accepts a directory. Never run `import` against a file a server
+has open: it removes the index and rebuilds it in place.
 
 ## Rules
 
