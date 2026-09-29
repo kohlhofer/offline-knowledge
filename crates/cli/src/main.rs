@@ -3,7 +3,6 @@ mod mcp;
 mod serve;
 mod tui;
 
-use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use std::io::Write;
@@ -86,7 +85,7 @@ enum Command {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let paths = zim_paths(&cli.zim)?;
+    let (paths, aliases) = zim_paths(&cli.zim)?;
     let wanted = cli.collection.as_deref();
     match cli.command.unwrap_or(Command::Tui) {
         Command::Import { heap_mb, force } => run_imports(&paths, heap_mb, force, &mut std::io::stdout().lock()),
@@ -94,12 +93,13 @@ fn main() -> Result<()> {
             // Not through `loaded`: the report below owns the skipped lines
             // for this one command, so they are not printed to stderr first
             // and then again to stdout around the loaded list.
-            print!("{}", collections_report(&Collections::open(&paths, wanted, serve::RESERVED_SEGMENTS)?.resolve_labels()?)?);
+            let collections = Collections::open(&paths, wanted, serve::RESERVED_SEGMENTS)?.resolve_labels()?;
+            print!("{}", collections_report(&collections, &aliases)?);
             Ok(())
         }
-        Command::Tui => tui::run(set(&paths, wanted)?),
+        Command::Tui => tui::run(set(&paths, &aliases, wanted)?),
         Command::Suggest { query, limit } => {
-            let library = active(&paths, wanted)?;
+            let library = active(&paths, &aliases, wanted)?;
             let started = Instant::now();
             let hits = library.suggest(&query.join(" "), limit)?;
             let took = started.elapsed();
@@ -112,7 +112,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Search { query, limit } => {
-            let library = active(&paths, wanted)?;
+            let library = active(&paths, &aliases, wanted)?;
             let started = Instant::now();
             let hits = library.search(&query.join(" "), limit)?;
             let took = started.elapsed();
@@ -123,7 +123,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Show { title, json } => {
-            let library = active(&paths, wanted)?;
+            let library = active(&paths, &aliases, wanted)?;
             let asked = title.join(" ");
             let target = match library.resolve_title(&asked)? {
                 Resolution::Found(t) => t,
@@ -154,7 +154,7 @@ fn main() -> Result<()> {
             // set of collections costs, and `ok bench` shows no label. The
             // one `--http` needs is resolved in `bench::http_bench`, outside
             // every timed row.
-            let collections = Arc::new(loaded(&paths, wanted)?);
+            let collections = Arc::new(loaded(&paths, &aliases, wanted)?);
             let load = started.elapsed();
             let open = {
                 let started = Instant::now();
@@ -164,8 +164,8 @@ fn main() -> Result<()> {
             };
             bench::run(collections, load, open, samples, json, http)
         }
-        Command::Serve { bind } => serve::run(set(&paths, wanted)?, bind),
-        Command::Mcp => mcp::run(set(&paths, wanted)?),
+        Command::Serve { bind } => serve::run(set(&paths, &aliases, wanted)?, bind),
+        Command::Mcp => mcp::run(set(&paths, &aliases, wanted)?),
     }
 }
 
@@ -180,8 +180,14 @@ fn main() -> Result<()> {
 /// One file is one collection however it was named: the appliance ships
 /// `OK_ZIM=/data`, so `--zim /data/x.zim` on top of it otherwise gives that
 /// file two entries and `Collections::open` reports its label as taken by
-/// itself.
-fn zim_paths(given: &[PathBuf]) -> Result<Vec<PathBuf>> {
+/// itself. The name that keeps the entry is one that has an index, because
+/// an index belongs to a name rather than to the file behind it: a `/data`
+/// holding a ZIM and a symlink to it otherwise collapsed onto whichever
+/// name sorted first, and an imported collection vanished behind "has not
+/// been imported yet" naming a file nobody had asked about. The names that
+/// lost come back with the paths, one ready line each, since a collapse
+/// nobody is told about is the same defect seen from the other side.
+fn zim_paths(given: &[PathBuf]) -> Result<(Vec<PathBuf>, Vec<String>)> {
     if given.is_empty() {
         bail!("no ZIM file given: pass --zim <file> or set OK_ZIM");
     }
@@ -202,23 +208,41 @@ fn zim_paths(given: &[PathBuf]) -> Result<Vec<PathBuf>> {
         found.sort();
         candidates.extend(found);
     }
-    let mut seen = HashSet::new();
-    let mut paths = Vec::new();
+    // The canonical path is the identity; the path as given is what the
+    // reasons and the `ok --zim <path> import` they name have to carry.
+    let mut groups: Vec<(PathBuf, Vec<PathBuf>)> = Vec::new();
     for path in candidates {
-        // The canonical path is the identity; the path as given is what the
-        // reasons and the `ok --zim <path> import` they name have to carry.
-        if seen.insert(path.canonicalize().unwrap_or_else(|_| path.clone())) {
-            paths.push(path);
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+        match groups.iter_mut().find(|(seen, _)| *seen == canonical) {
+            Some((_, names)) => names.push(path),
+            None => groups.push((canonical, vec![path])),
         }
     }
-    Ok(paths)
+    let mut paths = Vec::new();
+    let mut dropped = Vec::new();
+    for (_, mut names) in groups {
+        let keep = names.iter().position(|name| is_imported(name)).unwrap_or(0);
+        let kept = names.remove(keep);
+        dropped.extend(names.iter().map(|name| format!("{}: the same file as {}", show_path(name), show_path(&kept))));
+        paths.push(kept);
+    }
+    Ok((paths, dropped))
+}
+
+/// Whether this file has an index, asked the way `ok import` asks it.
+fn is_imported(zim: &Path) -> bool {
+    index_dir_for(zim).join("meta.json").exists()
 }
 
 /// The loaded set, with every file that could not be loaded named on
-/// stderr. Unconditional: a file dropped into the directory that goes
-/// nowhere must not go nowhere silently.
-fn loaded(paths: &[PathBuf], collection: Option<&str>) -> Result<Collections> {
+/// stderr, and every name that collapsed onto another with it.
+/// Unconditional: a file dropped into the directory that goes nowhere must
+/// not go nowhere silently.
+fn loaded(paths: &[PathBuf], aliases: &[String], collection: Option<&str>) -> Result<Collections> {
     let collections = Collections::open(paths, collection, serve::RESERVED_SEGMENTS)?;
+    for line in aliases {
+        eprintln!("skipped {line}");
+    }
     for skipped in collections.skipped() {
         eprintln!("skipped {}: {}", show_path(&skipped.path), skipped.reason);
     }
@@ -228,15 +252,15 @@ fn loaded(paths: &[PathBuf], collection: Option<&str>) -> Result<Collections> {
 /// The loaded set behind an `Arc`, every label resolved: what a frontend
 /// that shows or routes labels needs. A one-shot goes through [`active`]
 /// instead and resolves none.
-fn set(paths: &[PathBuf], collection: Option<&str>) -> Result<Arc<Collections>> {
-    Ok(Arc::new(loaded(paths, collection)?.resolve_labels()?))
+fn set(paths: &[PathBuf], aliases: &[String], collection: Option<&str>) -> Result<Arc<Collections>> {
+    Ok(Arc::new(loaded(paths, aliases, collection)?.resolve_labels()?))
 }
 
 
 /// The active collection's library, and nothing else opened: opening is
 /// what costs.
-fn active(paths: &[PathBuf], collection: Option<&str>) -> Result<Arc<Library>> {
-    let collections = loaded(paths, collection)?;
+fn active(paths: &[PathBuf], aliases: &[String], collection: Option<&str>) -> Result<Arc<Library>> {
+    let collections = loaded(paths, aliases, collection)?;
     let active = collections.default();
     active.library().with_context(|| format!("opening {}", active.zim_path().display()))
 }
@@ -244,7 +268,7 @@ fn active(paths: &[PathBuf], collection: Option<&str>) -> Result<Arc<Library>> {
 /// `ok collections`: the one command that opens every collection on
 /// purpose, because opening is the only thing that separates "imported and
 /// still matching its ZIM" from "imported once, ZIM replaced since".
-fn collections_report(collections: &Collections) -> Result<String> {
+fn collections_report(collections: &Collections, aliases: &[String]) -> Result<String> {
     let mut out = String::new();
     for (i, collection) in collections.iter().enumerate() {
         let label = collection.label()?;
@@ -254,6 +278,9 @@ fn collections_report(collections: &Collections) -> Result<String> {
             Err(_) => format!("failed: {}", collection.failure().unwrap_or("could not be opened")),
         };
         writeln!(out, "{label}{default}  {}  {state}", text::sanitize_line(collection.title()))?;
+    }
+    for line in aliases {
+        writeln!(out, "skipped {line}")?;
     }
     for skipped in collections.skipped() {
         writeln!(out, "skipped {}: {}", show_path(&skipped.path), skipped.reason)?;
@@ -274,7 +301,7 @@ fn show_path(path: &Path) -> String {
 fn run_imports(paths: &[PathBuf], heap_mb: usize, force: bool, out: &mut dyn Write) -> Result<()> {
     let mut failed = 0;
     for path in paths {
-        if !force && index_dir_for(path).join("meta.json").exists() {
+        if !force && is_imported(path) {
             writeln!(out, "{} is already imported; pass --force to rebuild it", show_path(path))?;
             continue;
         }
@@ -370,11 +397,11 @@ mod tests {
         std::fs::create_dir(dir.path().join("devdocs")).unwrap();
         std::fs::write(dir.path().join("notes.txt"), "x").unwrap();
 
-        let expanded = zim_paths(&[dir.path().to_path_buf()]).unwrap();
+        let (expanded, _) = zim_paths(&[dir.path().to_path_buf()]).unwrap();
         let names: Vec<&str> = expanded.iter().map(|p| p.file_name().unwrap().to_str().unwrap()).collect();
         assert_eq!(names, ["a.zim", "b.zim"], "sorted, so the default collection does not depend on the filesystem");
 
-        let given = zim_paths(&[dir.path().join("b.zim"), dir.path().join("a.zim")]).unwrap();
+        let (given, _) = zim_paths(&[dir.path().join("b.zim"), dir.path().join("a.zim")]).unwrap();
         assert!(given[0].ends_with("b.zim") && given[1].ends_with("a.zim"), "two --zim flags keep the order given");
 
         assert!(zim_paths(&[]).is_err(), "no --zim at all is an error, not an empty set");
@@ -389,15 +416,47 @@ mod tests {
         zim(dir.path(), "a.zim", "wikipedia_en_top", "mwoffliner 1.17.5", &["Albert Einstein"]);
         zim(dir.path(), "b.zim", "wiktionary_en_all", "mwoffliner 1.17.5", &["Mercury"]);
 
-        let expanded = zim_paths(&[dir.path().to_path_buf(), dir.path().join("a.zim")]).unwrap();
+        let (expanded, _) = zim_paths(&[dir.path().to_path_buf(), dir.path().join("a.zim")]).unwrap();
         let names: Vec<&str> = expanded.iter().map(|p| p.file_name().unwrap().to_str().unwrap()).collect();
         assert_eq!(names, ["a.zim", "b.zim"], "the directory already stood for a.zim: {expanded:?}");
 
-        let twice = zim_paths(&[dir.path().join("a.zim"), dir.path().join("a.zim")]).unwrap();
+        let (twice, _) = zim_paths(&[dir.path().join("a.zim"), dir.path().join("a.zim")]).unwrap();
         assert_eq!(twice.len(), 1, "the same path twice is one collection: {twice:?}");
 
-        let both = zim_paths(&[dir.path().to_path_buf(), dir.path().to_path_buf()]).unwrap();
+        let (both, _) = zim_paths(&[dir.path().to_path_buf(), dir.path().to_path_buf()]).unwrap();
         assert_eq!(both.len(), 2, "and so is the same directory twice: {both:?}");
+    }
+
+    /// Which name a file keeps decides whether its collection loads at all.
+    /// A directory holding both a ZIM and a symlink to it collapsed onto
+    /// whichever name sorted first, so a fully imported collection vanished
+    /// behind "has not been imported yet" naming a file the operator had
+    /// never heard of. The entry goes to a name that has an index, and the
+    /// names it does not go to are said out loud.
+    #[test]
+    fn one_files_many_names_collapse_onto_the_one_that_has_an_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = zim(dir.path(), "wiktionary_en_all.zim", "wiktionary_en_all", "mwoffliner 1.17.5", &["Mercury"]);
+        run_imports(std::slice::from_ref(&real), 20, false, &mut Vec::new()).unwrap();
+        // Sorts first and has no index of its own, which is the whole trap.
+        std::os::unix::fs::symlink(&real, dir.path().join("aardvark_en_all.zim")).unwrap();
+        std::os::unix::fs::symlink(&real, dir.path().join("wiktionary_copy.zim")).unwrap();
+
+        let (paths, dropped) = zim_paths(&[dir.path().to_path_buf()]).unwrap();
+        assert_eq!(paths, [real], "the imported name is the one that keeps the entry: {paths:?}");
+        assert_eq!(dropped.len(), 2, "and the rest are reported, not swallowed: {dropped:?}");
+        assert!(dropped[0].starts_with(&format!("{}/aardvark_en_all.zim: ", dir.path().display())), "{}", dropped[0]);
+        assert!(dropped[0].ends_with("wiktionary_en_all.zim"), "each names the file it collapsed into: {}", dropped[0]);
+        assert!(dropped[1].contains("wiktionary_copy.zim"), "{}", dropped[1]);
+
+        // Nothing imported yet: the first name given keeps the entry, so the
+        // reason an operator reads names the file they wrote down.
+        let none = tempfile::tempdir().unwrap();
+        let first = zim(none.path(), "a.zim", "wikipedia_en_top", "mwoffliner 1.17.5", &["Albert Einstein"]);
+        std::os::unix::fs::symlink(&first, none.path().join("z.zim")).unwrap();
+        let (paths, dropped) = zim_paths(&[none.path().to_path_buf()]).unwrap();
+        assert_eq!(paths, [first], "{paths:?}");
+        assert_eq!(dropped.len(), 1);
     }
 
 
@@ -410,7 +469,7 @@ mod tests {
         let good = zim(dir.path(), "a.zim", "wikipedia_en_top", "mwoffliner 1.17.5", &["Albert Einstein"]);
         let other = zim(dir.path(), "b.zim", "wiktionary_en_all", "mwoffliner 1.17.5", &["Mercury"]);
         let refused = zim(dir.path(), "c.zim", "stack_en_all", "sotoki 1.3", &["Question"]);
-        let paths = zim_paths(&[dir.path().to_path_buf()]).unwrap();
+        let (paths, _) = zim_paths(&[dir.path().to_path_buf()]).unwrap();
 
         let err = run_imports(&paths, 20, false, &mut Vec::new()).err().unwrap().to_string();
         assert!(err.contains("1 of 3"), "the run exits non-zero saying how many failed: {err}");
@@ -442,9 +501,10 @@ mod tests {
         // A different file at the same path: the index no longer describes it.
         zim(dir.path(), "a.zim", "wikipedia_en_top", "mwoffliner 1.17.5", &["Marie Curie", "Ulm", "Bern"]);
         zim(dir.path(), "b.zim", "wiktionary_en_all", "mwoffliner 1.17.5", &["Mercury"]);
-        let paths = zim_paths(&[dir.path().to_path_buf()]).unwrap();
+        let (paths, _) = zim_paths(&[dir.path().to_path_buf()]).unwrap();
 
-        let report = collections_report(&Collections::open(&paths, None, &[]).unwrap().resolve_labels().unwrap()).unwrap();
+        let collections = Collections::open(&paths, None, &[]).unwrap().resolve_labels().unwrap();
+        let report = collections_report(&collections, &[]).unwrap();
         assert!(report.contains("wikipedia (default)"), "{report}");
         assert!(report.contains("failed:"), "an index that no longer matches its ZIM is named failed: {report}");
         let skipped = report.lines().find(|l| l.starts_with("skipped ")).unwrap_or_default();
