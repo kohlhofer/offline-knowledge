@@ -156,7 +156,7 @@ fn main() -> Result<()> {
             bench::run(collections, load, open, samples, json, http)
         }
         Command::Serve { bind } => serve::run(set(&paths, wanted)?, bind),
-        Command::Mcp => mcp::run(active(&paths, wanted)?),
+        Command::Mcp => mcp::run(set(&paths, wanted)?),
     }
 }
 

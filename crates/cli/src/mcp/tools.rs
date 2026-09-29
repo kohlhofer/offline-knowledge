@@ -4,10 +4,51 @@
 //! wraps whichever came back into a `CallToolResult`.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use ok_core::document::{Block, Document, Link, inline_text, truncate_words};
 use ok_core::text::{sanitize, sanitize_line};
-use ok_core::{Library, Resolution, Suggestion};
+use ok_core::{Collections, Library, Resolution, Suggestion};
+
+/// The collection a tool call answers from, and the set it belongs to.
+/// Every ranked list comes from `library` alone; the set is here for the
+/// label that qualifies an identifier, and for the one cross-collection
+/// probe a miss is allowed to make.
+pub struct Scope {
+    collections: Arc<Collections>,
+    index: usize,
+    library: Arc<Library>,
+}
+
+impl Scope {
+    /// Opens the collection at `index`, which is where a ZIM that no longer
+    /// matches its index surfaces: the caller's to act on, like every other
+    /// failure these tools return, with the detail kept to stderr.
+    pub fn new(collections: Arc<Collections>, index: usize) -> Result<Scope, String> {
+        let collection = collections.at(index).ok_or_else(|| "no such collection".to_string())?;
+        let label = collection.label().map(|l| l.to_string()).unwrap_or_else(|_| "that".to_string());
+        let library = collection.library().map_err(|e| {
+            eprintln!("mcp: collection \"{label}\" could not be opened: {e}");
+            format!("the \"{label}\" collection could not be opened — re-run `ok import` for it")
+        })?;
+        Ok(Scope { collections, index, library })
+    }
+
+    pub fn library(&self) -> &Library {
+        &self.library
+    }
+
+    /// The label every identifier in the response is qualified with, and
+    /// `None` when one collection is loaded: a bare title then means the
+    /// only collection there is, so the output is what it was before
+    /// collections existed.
+    pub fn label(&self) -> Option<&str> {
+        if self.collections.len() < 2 {
+            return None;
+        }
+        self.collections.at(self.index)?.label().ok().map(|l| l.as_str())
+    }
+}
 
 const SEARCH_SUMMARY_CHARS: usize = 140;
 const MAX_SECTION_CHARS: usize = 6000;
@@ -40,25 +81,43 @@ fn fence_inline(text: &str) -> String {
     format!("{ARTICLE_TEXT_OPEN}{}{ARTICLE_TEXT_CLOSE}", defuse_fence_markers(text))
 }
 
+/// An identifier — something the agent can feed straight back into `read`
+/// or `links` — with its collection, inside **one** fence. Fencing only the
+/// title would split the copyable token in two and leave the agent to
+/// reassemble it; this way the whole token stays whole and every
+/// ZIM-derived byte still sits inside a fence, the label being validated
+/// ASCII that cannot contain a fence marker.
+fn fence_identifier(scope: &Scope, title: &str) -> String {
+    match scope.label() {
+        Some(label) => format!("{ARTICLE_TEXT_OPEN}{label}/{}{ARTICLE_TEXT_CLOSE}", defuse_fence_markers(title)),
+        None => fence_inline(title),
+    }
+}
+
 /// Title matches (via `Library::suggest`) first, then full-text matches,
 /// deduplicated by article and capped at `limit`. Title matches never parse
 /// a full article — that would cost as much as `limit` article loads for a
 /// plainer line, since the title itself is already the point of a title hit.
 /// The full-text query itself is skipped once the title hits alone already
 /// fill `limit` — those extra results would only be truncated away.
-pub fn search_text(library: &Library, query: &str, limit: usize) -> Result<String, String> {
+pub fn search_text(scope: &Scope, query: &str, limit: usize) -> Result<String, String> {
     if query.trim().is_empty() {
         return Err("search needs a non-empty query".to_string());
     }
+    let library = scope.library();
     let title_hits = library.suggest(query, limit).map_err(|e| lookup_error(query, e))?;
     let mut seen: HashSet<u32> = title_hits.iter().map(|s| s.article).collect();
     let mut lines: Vec<String> = title_hits
         .iter()
         .map(|s| match &s.matched {
             Some(alias) => {
-                format!("{} — title match via \"{}\"", fence_inline(&sanitize_line(&s.title)), fence_inline(&sanitize_line(alias)))
+                format!(
+                    "{} — title match via \"{}\"",
+                    fence_identifier(scope, &sanitize_line(&s.title)),
+                    fence_identifier(scope, &sanitize_line(alias))
+                )
             }
-            None => fence_inline(&sanitize_line(&s.title)),
+            None => fence_identifier(scope, &sanitize_line(&s.title)),
         })
         .collect();
 
@@ -67,13 +126,13 @@ pub fn search_text(library: &Library, query: &str, limit: usize) -> Result<Strin
         for hit in text_hits {
             if seen.insert(hit.article) {
                 let summary = truncate_words(&sanitize_line(&hit.summary), SEARCH_SUMMARY_CHARS);
-                lines.push(format!("{} — {}", fence_inline(&sanitize_line(&hit.title)), fence_inline(&summary)));
+                lines.push(format!("{} — {}", fence_identifier(scope, &sanitize_line(&hit.title)), fence_inline(&summary)));
             }
         }
     }
 
     lines.truncate(limit);
-    let header = search_header(lines.len(), limit, query);
+    let header = search_header(lines.len(), limit, query, scope.label());
     Ok(std::iter::once(header).chain(lines).collect::<Vec<_>>().join("\n"))
 }
 
@@ -89,13 +148,20 @@ pub fn search_text(library: &Library, query: &str, limit: usize) -> Result<Strin
 /// A zero-hit search names a next step, same as every other failure path
 /// (N12); a possibly-truncated one says so, so an agent doesn't mistake a
 /// capped list for all of it (N23).
-pub(super) fn search_header(shown: usize, limit: usize, query: &str) -> String {
+/// `collection`, when the process holds more than one, names which one
+/// answered — the header is the only line a search response has to say it
+/// on, and every identifier under it carries the same label.
+pub(super) fn search_header(shown: usize, limit: usize, query: &str, collection: Option<&str>) -> String {
+    let subject = match collection {
+        Some(label) => format!("\"{}\" in {label}", sanitize(query)),
+        None => format!("\"{}\"", sanitize(query)),
+    };
     if shown == 0 {
-        format!("0 shown for \"{}\" — try different words, or fewer of them", sanitize(query))
+        format!("0 shown for {subject} — try different words, or fewer of them")
     } else if shown == limit {
-        format!("{shown} shown for \"{}\" — more may exist, call search again with a higher limit", sanitize(query))
+        format!("{shown} shown for {subject} — more may exist, call search again with a higher limit")
     } else {
-        format!("{shown} shown for \"{}\"", sanitize(query))
+        format!("{shown} shown for {subject}")
     }
 }
 
@@ -112,20 +178,21 @@ pub(super) fn search_header(shown: usize, limit: usize, query: &str) -> String {
 /// first, same as any other heading — so `read` and `links` agree on what
 /// that argument means, and the keyword only ever shadows a section no
 /// article actually has.
-pub fn read_text(library: &Library, article: &str, section: Option<&str>, offset: Option<usize>) -> Result<String, String> {
+pub fn read_text(scope: &Scope, article: &str, section: Option<&str>, offset: Option<usize>) -> Result<String, String> {
+    let library = scope.library();
     let target = resolve_article(library, article)?;
     let doc = library.article(target.entry).map_err(|e| lookup_error(article, e))?;
-    let note = redirect_note(article, &doc.title);
+    let note = redirect_note(scope, article, &doc.title);
     let (spec, from_redirect) = match section {
         Some(s) => (Some(s), false),
         None => (target.fragment.as_deref(), true),
     };
     let body = match spec {
-        None => Ok(read_overview(&doc)),
+        None => Ok(read_overview(scope, &doc)),
         Some(spec) => match resolve_section(&doc, spec, !from_redirect) {
             Some(index) => read_section(&doc, index, offset.unwrap_or(0)),
             None if !from_redirect && spec.eq_ignore_ascii_case("outline") => Ok(full_outline_text(&doc)),
-            None if from_redirect => Ok(read_overview(&doc)),
+            None if from_redirect => Ok(read_overview(scope, &doc)),
             None => Err(unresolvable_section_message(&doc, spec)),
         },
     };
@@ -142,29 +209,30 @@ pub fn read_text(library: &Library, article: &str, section: Option<&str>, offset
 /// article can misattribute the text it reads back. `None` when they agree
 /// (up to case, accents and underscore/space folding — the same equality
 /// `resolve_title` itself uses for an exact match).
-fn redirect_note(requested: &str, canonical_title: &str) -> Option<String> {
+fn redirect_note(scope: &Scope, requested: &str, canonical_title: &str) -> Option<String> {
     if ok_core::normalize::normalize(requested) == ok_core::normalize::normalize(canonical_title) {
         return None;
     }
-    Some(format!("Redirected from \"{}\" to {}", sanitize_line(requested), fence_inline(&sanitize_line(canonical_title))))
+    Some(format!("Redirected from \"{}\" to {}", sanitize_line(requested), fence_identifier(scope, &sanitize_line(canonical_title))))
 }
 
 /// Deduplicated by target entry, first-seen order, titles only. The trailing
 /// line counts unique missing and external targets, not occurrences, so a
 /// repeated nav/infobox link to the same missing target doesn't inflate it.
-pub fn links_text(library: &Library, article: &str, section: Option<&str>) -> Result<String, String> {
+pub fn links_text(scope: &Scope, article: &str, section: Option<&str>) -> Result<String, String> {
+    let library = scope.library();
     let target = resolve_article(library, article)?;
     let doc = library.article(target.entry).map_err(|e| lookup_error(article, e))?;
-    let note = redirect_note(article, &doc.title);
+    let note = redirect_note(scope, article, &doc.title);
     let (spec, from_redirect) = match section {
         Some(s) => (Some(s), false),
         None => (target.fragment.as_deref(), true),
     };
-    let (links, scope): (Vec<Link>, String) = match spec {
-        None => (doc.links().cloned().collect(), fence_inline(&sanitize_line(&doc.title))),
+    let (links, whose): (Vec<Link>, String) = match spec {
+        None => (doc.links().cloned().collect(), fence_identifier(scope, &sanitize_line(&doc.title))),
         Some(spec) => match resolve_section(&doc, spec, !from_redirect) {
             Some(index) => (doc.section_links(index).cloned().collect(), fence_inline(&sanitize_line(&doc.sections[index].heading))),
-            None if from_redirect => (doc.links().cloned().collect(), fence_inline(&sanitize_line(&doc.title))),
+            None if from_redirect => (doc.links().cloned().collect(), fence_identifier(scope, &sanitize_line(&doc.title))),
             None => return Err(unresolvable_section_message(&doc, spec)),
         },
     };
@@ -178,7 +246,7 @@ pub fn links_text(library: &Library, article: &str, section: Option<&str>) -> Re
             Link::Article { entry, .. } => {
                 if seen_articles.insert(entry) {
                     match library.title(entry) {
-                        Ok(title) => titles.push(fence_inline(&sanitize_line(&title))),
+                        Ok(title) => titles.push(fence_identifier(scope, &sanitize_line(&title))),
                         // A dangling entry index is this codebase's problem to log, never
                         // the agent's to see (no entry indices in tool output).
                         Err(e) => eprintln!("mcp links: title lookup for entry {entry} failed: {e}"),
@@ -195,7 +263,7 @@ pub fn links_text(library: &Library, article: &str, section: Option<&str>) -> Re
         }
     }
 
-    let header = format!("{} unique articles linked from \"{}\"", titles.len(), scope);
+    let header = format!("{} unique articles linked from \"{}\"", titles.len(), whose);
     let mut out = std::iter::once(header).chain(titles).collect::<Vec<_>>().join("\n");
     let mut counts = Vec::new();
     if !missing.is_empty() {
@@ -282,7 +350,7 @@ fn unresolvable_section_message(doc: &Document, spec: &str) -> String {
     )
 }
 
-fn read_overview(doc: &Document) -> String {
+fn read_overview(scope: &Scope, doc: &Document) -> String {
     let lead = &doc.sections[0];
     let paragraphs: Vec<String> = lead
         .blocks
@@ -296,7 +364,7 @@ fn read_overview(doc: &Document) -> String {
     let (totals, ends) = section_stats(doc);
     let mut out = format!(
         "{} · {} chars · {} sections\n\n{ARTICLE_TEXT_OPEN}\n{}",
-        fence_inline(&sanitize_line(&doc.title)),
+        fence_identifier(scope, &sanitize_line(&doc.title)),
         totals[0],
         doc.sections.len(),
         defuse_fence_markers(&paragraphs.join("\n\n"))

@@ -1,5 +1,5 @@
-use ok_core::Resolution;
 use ok_core::import::{ImportOptions, import};
+use ok_core::{Collections, Resolution};
 use ok_zim::write::ZimBuilder;
 use rmcp::ServiceExt;
 use rmcp::model::CallToolRequestParams;
@@ -59,28 +59,64 @@ fn wiki() -> Vec<u8> {
         )
         .redirect("Einstein", "Einstein", "Albert_Einstein")
         .metadata("Title", "Tiny wiki")
+        .metadata("Name", "wikipedia_en_top")
         .metadata("Scraper", "mwoffliner 1.17.5")
         .build()
 }
 
-fn imported() -> (tempfile::TempDir, Library) {
-    let dir = tempfile::tempdir().unwrap();
-    let zim = dir.path().join("t.zim");
-    std::fs::write(&zim, wiki()).unwrap();
+fn write_imported(dir: &std::path::Path, file: &str, bytes: Vec<u8>) -> std::path::PathBuf {
+    let zim = dir.join(file);
+    std::fs::write(&zim, bytes).unwrap();
     import(&zim, &ImportOptions { heap_bytes: 20_000_000 }, &|_| {}).unwrap();
-    let library = Library::open(&zim).unwrap();
-    (dir, library)
+    zim
+}
+
+fn set_over(paths: &[std::path::PathBuf]) -> Arc<Collections> {
+    Arc::new(Collections::open(paths, None).unwrap())
+}
+
+/// The shared fixture as a set, for the end-to-end tests that need a real
+/// `Mcp` rather than a [`tools::Scope`].
+fn one_collection() -> (tempfile::TempDir, Arc<Collections>) {
+    let dir = tempfile::tempdir().unwrap();
+    let zim = write_imported(dir.path(), "t.zim", wiki());
+    (dir, set_over(&[zim]))
+}
+
+/// One collection, the shared fixture: with a single collection loaded no
+/// identifier is qualified, so every expectation here is what this server
+/// answered before collections existed.
+fn imported() -> (tempfile::TempDir, tools::Scope) {
+    scope_over(wiki())
 }
 
 /// A one-article ZIM, imported: for tests that need a specific dirent title
 /// or HTML body a shared fixture's other assertions would be disturbed by.
-fn library_with(bytes: Vec<u8>) -> (tempfile::TempDir, Library) {
+fn scope_over(bytes: Vec<u8>) -> (tempfile::TempDir, tools::Scope) {
     let dir = tempfile::tempdir().unwrap();
-    let zim = dir.path().join("t.zim");
-    std::fs::write(&zim, bytes).unwrap();
-    import(&zim, &ImportOptions { heap_bytes: 20_000_000 }, &|_| {}).unwrap();
-    let library = Library::open(&zim).unwrap();
-    (dir, library)
+    let zim = write_imported(dir.path(), "t.zim", bytes);
+    let scope = tools::Scope::new(set_over(&[zim]), 0).unwrap();
+    (dir, scope)
+}
+
+/// A dictionary beside the wiki, so identifiers have a collection to carry.
+fn two_collections() -> (tempfile::TempDir, Arc<Collections>) {
+    let dir = tempfile::tempdir().unwrap();
+    let a = write_imported(dir.path(), "a.zim", wiki());
+    let b = write_imported(
+        dir.path(),
+        "b.zim",
+        ZimBuilder::new()
+            .article("Mercury", "Mercury", &page("Mercury", "<p>A metal, and a planet.</p>"))
+            // An article whose own title carries a slash: the split is at
+            // the first one, and only when the prefix is a loaded label.
+            .article("AC_DC", "AC/DC", &page("AC/DC", "<p>A band.</p>"))
+            .metadata("Title", "Tiny dictionary")
+            .metadata("Name", "wiktionary_en-simple_all")
+            .metadata("Scraper", "mwoffliner 1.17.5")
+            .build(),
+    );
+    (dir, set_over(&[a, b]))
 }
 
 // ---------------------------------------------------------------------
@@ -89,8 +125,8 @@ fn library_with(bytes: Vec<u8>) -> (tempfile::TempDir, Library) {
 
 #[test]
 fn search_title_hits_before_fulltext_alias_shown_deduplicated() {
-    let (_d, library) = imported();
-    let text = tools::search_text(&library, "einstein", 8).unwrap();
+    let (_d, scope) = imported();
+    let text = tools::search_text(&scope, "einstein", 8).unwrap();
     let lines: Vec<&str> = text.lines().collect();
     assert!(lines[0].starts_with("2 shown for \"einstein\"") || lines[0].starts_with("1 shown for \"einstein\""), "{text}");
     // The title hit (via the "Einstein" alias) comes before any full-text
@@ -107,7 +143,7 @@ fn search_title_hits_before_fulltext_alias_shown_deduplicated() {
 /// result line.
 #[test]
 fn search_result_title_collapses_an_embedded_newline_and_is_fenced() {
-    let (_d, library) = library_with(
+    let (_d, scope) = scope_over(
         ZimBuilder::new()
             .article("Newline_Title", "Ein\nstein Prize", &page("Einstein Prize", "<p>Some prose about a prize.</p>"))
             .metadata("Title", "Tiny wiki")
@@ -115,35 +151,35 @@ fn search_result_title_collapses_an_embedded_newline_and_is_fenced() {
             .build(),
     );
 
-    let text = tools::search_text(&library, "Ein", 5).unwrap();
+    let text = tools::search_text(&scope, "Ein", 5).unwrap();
     assert!(text.contains("<article-text>Ein stein Prize</article-text>"), "{text}");
     assert!(!text.lines().any(|l| l == "stein Prize"), "an embedded newline must not fake a second result line: {text}");
 }
 
 #[test]
 fn search_empty_query_is_an_error() {
-    let (_d, library) = imported();
-    assert!(tools::search_text(&library, "   ", 8).is_err());
+    let (_d, scope) = imported();
+    assert!(tools::search_text(&scope, "   ", 8).is_err());
 }
 
 #[test]
 fn search_header_names_the_next_step_or_that_more_may_exist() {
-    assert_eq!(tools::search_header(0, 5, "zzz"), "0 shown for \"zzz\" — try different words, or fewer of them");
+    assert_eq!(tools::search_header(0, 5, "zzz", None), "0 shown for \"zzz\" — try different words, or fewer of them");
     // Under the cap: no total is claimed, truncated or not.
-    assert_eq!(tools::search_header(2, 5, "x"), "2 shown for \"x\"");
+    assert_eq!(tools::search_header(2, 5, "x", None), "2 shown for \"x\"");
     // At the cap: never a specific total (neither query result is a real
     // corpus count), just an honest "more may exist" either way.
-    assert_eq!(tools::search_header(5, 5, "x"), "5 shown for \"x\" — more may exist, call search again with a higher limit");
+    assert_eq!(tools::search_header(5, 5, "x", None), "5 shown for \"x\" — more may exist, call search again with a higher limit");
 }
 
 #[test]
 fn search_skips_fulltext_when_title_hits_already_fill_the_limit() {
-    let (_d, library) = imported();
+    let (_d, scope) = imported();
     // "einstein" alone at limit=1 is satisfied by the title/alias hit — the
     // full-text query is never reached (L16). Its output is unaffected by
     // the skip either way, since a filled limit truncates extra hits away
     // regardless; this pins that preserved contract.
-    let text = tools::search_text(&library, "einstein", 1).unwrap();
+    let text = tools::search_text(&scope, "einstein", 1).unwrap();
     assert!(text.contains("Albert Einstein"), "{text}");
     assert_eq!(text.lines().count(), 2, "header plus exactly one result: {text}");
     // Title hits alone filling the limit used to mean "no truncation" (the
@@ -154,8 +190,8 @@ fn search_skips_fulltext_when_title_hits_already_fill_the_limit() {
 
 #[test]
 fn read_without_section_shows_lead_facts_and_a_top_level_outline() {
-    let (_d, library) = imported();
-    let text = tools::read_text(&library, "Albert Einstein", None, None).unwrap();
+    let (_d, scope) = imported();
+    let text = tools::read_text(&scope, "Albert Einstein", None, None).unwrap();
     assert!(text.starts_with("<article-text>Albert Einstein</article-text> · "), "{text}");
     assert!(text.contains("physicist who developed"), "{text}");
     assert!(text.contains("Born: 1879"), "{text}");
@@ -176,11 +212,11 @@ fn read_without_section_shows_lead_facts_and_a_top_level_outline() {
 /// "Albert Einstein" back could misattribute the text without this.
 #[test]
 fn read_title_redirect_names_the_requested_title() {
-    let (_d, library) = imported();
-    let text = tools::read_text(&library, "Einstein", None, None).unwrap();
+    let (_d, scope) = imported();
+    let text = tools::read_text(&scope, "Einstein", None, None).unwrap();
     assert!(text.starts_with("Redirected from \"Einstein\" to <article-text>Albert Einstein</article-text>\n"), "{text}");
 
-    let links = tools::links_text(&library, "Einstein", None).unwrap();
+    let links = tools::links_text(&scope, "Einstein", None).unwrap();
     assert!(links.starts_with("Redirected from \"Einstein\" to <article-text>Albert Einstein</article-text>\n"), "{links}");
 }
 
@@ -192,7 +228,7 @@ fn read_title_redirect_names_the_requested_title() {
 /// close and open markers.
 #[test]
 fn read_lead_text_escapes_a_forged_fence_marker_instead_of_letting_it_close_the_fence() {
-    let (_d, library) = library_with(
+    let (_d, scope) = scope_over(
         ZimBuilder::new()
             .article(
                 "Forger",
@@ -204,7 +240,7 @@ fn read_lead_text_escapes_a_forged_fence_marker_instead_of_letting_it_close_the_
             .build(),
     );
 
-    let text = tools::read_text(&library, "Forger", None, None).unwrap();
+    let text = tools::read_text(&scope, "Forger", None, None).unwrap();
     assert!(text.contains("&lt;/article-text&gt;"), "the article's own closing tag is escaped, not literal: {text}");
     assert!(text.contains("&lt;article-text&gt;"), "the article's own opening tag is escaped, not literal: {text}");
     // Only the two real fences this module wrote remain literal: one around
@@ -215,8 +251,8 @@ fn read_lead_text_escapes_a_forged_fence_marker_instead_of_letting_it_close_the_
 
 #[test]
 fn read_section_outline_keyword_returns_the_full_outline() {
-    let (_d, library) = imported();
-    let text = tools::read_text(&library, "Albert Einstein", Some("outline"), None).unwrap();
+    let (_d, scope) = imported();
+    let text = tools::read_text(&scope, "Albert Einstein", Some("outline"), None).unwrap();
     assert!(text.contains("2    Early life ("), "the full outline lists every section, nested ones included: {text}");
 }
 
@@ -227,15 +263,15 @@ fn read_section_outline_keyword_returns_the_full_outline() {
 /// the last valid offset plus one.
 #[test]
 fn outline_char_count_matches_what_read_section_actually_accepts() {
-    let (_d, library) = imported();
-    let outline = tools::read_text(&library, "Albert Einstein", Some("outline"), None).unwrap();
+    let (_d, scope) = imported();
+    let outline = tools::read_text(&scope, "Albert Einstein", Some("outline"), None).unwrap();
     let line = outline.lines().find(|l| l.contains("Early life")).expect("the fixture's nested heading");
     let total: usize = line.split('(').nth(1).and_then(|s| s.trim_end_matches(" chars)").parse().ok()).expect("a parseable char count");
 
-    let err = tools::read_text(&library, "Albert Einstein", Some("Early life"), Some(total)).unwrap_err();
+    let err = tools::read_text(&scope, "Albert Einstein", Some("Early life"), Some(total)).unwrap_err();
     assert!(err.contains(&format!("({total} chars)")), "read_section's own total must match the outline's: {err}");
 
-    let ok = tools::read_text(&library, "Albert Einstein", Some("Early life"), Some(total - 1));
+    let ok = tools::read_text(&scope, "Albert Einstein", Some("Early life"), Some(total - 1));
     assert!(ok.is_ok(), "one less than the outline's total must still be inside the section: {ok:?}");
 }
 
@@ -245,7 +281,7 @@ fn outline_char_count_matches_what_read_section_actually_accepts() {
 /// `links`, which already resolved the real heading correctly.
 #[test]
 fn read_section_a_real_outline_heading_wins_over_the_keyword() {
-    let (_d, library) = library_with(
+    let (_d, scope) = scope_over(
         ZimBuilder::new()
             .article(
                 "Lobotomy",
@@ -263,34 +299,34 @@ fn read_section_a_real_outline_heading_wins_over_the_keyword() {
             .build(),
     );
 
-    let text = tools::read_text(&library, "Lobotomy", Some("outline"), None).unwrap();
+    let text = tools::read_text(&scope, "Lobotomy", Some("outline"), None).unwrap();
     assert!(text.contains("Steps of the procedure"), "the real \"Outline\" section's own text, not the synthetic outline dump: {text}");
     assert!(!text.contains("chars · "), "not the full-outline-dump header shape: {text}");
 
-    let links = tools::links_text(&library, "Lobotomy", Some("outline")).unwrap();
+    let links = tools::links_text(&scope, "Lobotomy", Some("outline")).unwrap();
     assert!(links.contains("Trepanning"), "links must resolve the same real heading read did: {links}");
 }
 
 #[test]
 fn read_section_by_index_and_by_heading_resolve_the_same_section() {
-    let (_d, library) = imported();
-    let by_index = tools::read_text(&library, "Albert Einstein", Some("1"), None).unwrap();
-    let by_heading = tools::read_text(&library, "Albert Einstein", Some("Life"), None).unwrap();
+    let (_d, scope) = imported();
+    let by_index = tools::read_text(&scope, "Albert Einstein", Some("1"), None).unwrap();
+    let by_heading = tools::read_text(&scope, "Albert Einstein", Some("Life"), None).unwrap();
     assert_eq!(by_index, by_heading);
     assert!(by_index.contains("Born in Ulm"), "{by_index}");
 }
 
 #[test]
 fn read_section_does_not_print_the_heading_twice() {
-    let (_d, library) = imported();
-    let text = tools::read_text(&library, "Albert Einstein", Some("Life"), None).unwrap();
+    let (_d, scope) = imported();
+    let text = tools::read_text(&scope, "Albert Einstein", Some("Life"), None).unwrap();
     assert_eq!(text.matches("Life").count(), 1, "\"Life\" the heading appears once, not once in the header and again in the body: {text}");
 }
 
 #[test]
 fn read_section_redirect_with_no_explicit_section_opens_that_section() {
-    let (_d, library) = imported();
-    let text = tools::read_text(&library, "Einstein early life", None, None).unwrap();
+    let (_d, scope) = imported();
+    let text = tools::read_text(&scope, "Einstein early life", None, None).unwrap();
     // The section redirect's own title never appears past this note, so an
     // agent can't attribute the "Life" section's text to "Einstein early
     // life" instead of the article that actually contains it.
@@ -304,8 +340,8 @@ fn read_section_redirect_with_no_explicit_section_opens_that_section() {
 
 #[test]
 fn read_section_redirect_with_an_unmatched_fragment_falls_back_to_the_overview() {
-    let (_d, library) = imported();
-    let text = tools::read_text(&library, "Stale reference", None, None).unwrap();
+    let (_d, scope) = imported();
+    let text = tools::read_text(&scope, "Stale reference", None, None).unwrap();
     assert!(text.starts_with("Redirected from \"Stale reference\" to "), "{text}");
     assert!(
         text.contains("<article-text>Albert Einstein</article-text> · "),
@@ -315,23 +351,23 @@ fn read_section_redirect_with_an_unmatched_fragment_falls_back_to_the_overview()
 
 #[test]
 fn links_section_redirect_with_an_unmatched_fragment_falls_back_to_the_whole_article() {
-    let (_d, library) = imported();
-    let text = tools::links_text(&library, "Stale reference", None).unwrap();
+    let (_d, scope) = imported();
+    let text = tools::links_text(&scope, "Stale reference", None).unwrap();
     assert!(text.contains("linked from \"<article-text>Albert Einstein</article-text>\""), "{text}");
 }
 
 #[test]
 fn read_out_of_range_section_names_the_actual_outline() {
-    let (_d, library) = imported();
-    let err = tools::read_text(&library, "Albert Einstein", Some("99"), None).unwrap_err();
+    let (_d, scope) = imported();
+    let err = tools::read_text(&scope, "Albert Einstein", Some("99"), None).unwrap_err();
     assert!(err.contains("no section \"99\""), "{err}");
     assert!(err.contains("Sections:") || err.contains("0  Albert Einstein"), "names the outline: {err}");
 }
 
 #[test]
 fn read_section_offset_past_the_end_is_an_error_naming_the_actual_length() {
-    let (_d, library) = imported();
-    let err = tools::read_text(&library, "Albert Einstein", Some("Life"), Some(9999)).unwrap_err();
+    let (_d, scope) = imported();
+    let err = tools::read_text(&scope, "Albert Einstein", Some("Life"), Some(9999)).unwrap_err();
     assert!(err.contains("past the end"), "{err}");
     assert!(err.contains("Life"), "{err}");
 }
@@ -359,8 +395,8 @@ fn resolve_section_numeric_fragment_matches_the_heading_not_the_outline_index() 
 
 #[test]
 fn read_unknown_article_is_an_error_with_suggestions() {
-    let (_d, library) = imported();
-    let err = tools::read_text(&library, "Not A Real Title At All", None, None).unwrap_err();
+    let (_d, scope) = imported();
+    let err = tools::read_text(&scope, "Not A Real Title At All", None, None).unwrap_err();
     assert!(err.contains("no article titled"), "{err}");
 }
 
@@ -371,7 +407,7 @@ fn read_unknown_article_is_an_error_with_suggestions() {
 /// presenting them as an answer to the query as typed (item 8).
 #[test]
 fn read_near_miss_is_an_error_naming_the_fallback_prefix_when_one_was_used() {
-    let (_d, library) = library_with(
+    let (_d, scope) = scope_over(
         ZimBuilder::new()
             .article("Cross_product", "Cross product", &page("Cross product", "<p>A binary operation on vectors.</p>"))
             .redirect("Xyzzy", "Xyzzy", "Cross_product")
@@ -382,14 +418,14 @@ fn read_near_miss_is_an_error_naming_the_fallback_prefix_when_one_was_used() {
 
     // "Xyzzyq" (6 chars) only matches via "Xyzzy" (5 chars): isError, not a
     // silent read of "Cross product", and the message names the prefix.
-    let err = tools::read_text(&library, "Xyzzyq", None, None).unwrap_err();
+    let err = tools::read_text(&scope, "Xyzzyq", None, None).unwrap_err();
     assert!(err.contains("titles starting with \"Xyzzy\""), "{err}");
     assert!(err.contains("Cross product"), "{err}");
 
     // "Xyzzyqqq" (8 chars) is far enough that even the shortened prefix
     // ("Xyzzy", 5/8 retained) falls under the fraction floor: no
     // suggestions at all, not "Cross product" presented as a guess.
-    let err = tools::read_text(&library, "Xyzzyqqq", None, None).unwrap_err();
+    let err = tools::read_text(&scope, "Xyzzyqqq", None, None).unwrap_err();
     assert!(!err.contains("Cross product"), "{err}");
 }
 
@@ -398,11 +434,11 @@ fn read_near_miss_is_an_error_naming_the_fallback_prefix_when_one_was_used() {
 /// there rather than in each caller.
 #[test]
 fn read_and_links_reject_an_oversized_article_name_instead_of_a_slow_resolve() {
-    let (_d, library) = imported();
+    let (_d, scope) = imported();
     let long = "a".repeat(201);
-    let read_err = tools::read_text(&library, &long, None, None).unwrap_err();
+    let read_err = tools::read_text(&scope, &long, None, None).unwrap_err();
     assert!(read_err.contains("at most"), "{read_err}");
-    let links_err = tools::links_text(&library, &long, None).unwrap_err();
+    let links_err = tools::links_text(&scope, &long, None).unwrap_err();
     assert!(links_err.contains("at most"), "{links_err}");
 }
 
@@ -421,12 +457,12 @@ fn lookup_error_never_leaks_the_underlying_error_detail() {
 
 #[test]
 fn read_section_truncates_at_a_char_boundary_and_round_trips_with_offset() {
-    let (_d, library) = imported();
-    let full = tools::read_text(&library, "Albert Einstein", Some("Early life"), None).unwrap();
+    let (_d, scope) = imported();
+    let full = tools::read_text(&scope, "Albert Einstein", Some("Early life"), None).unwrap();
     assert!(full.contains("…[truncated: call read with offset="), "{}", &full[..200.min(full.len())]);
 
     let offset: usize = full.split("offset=").nth(1).unwrap().trim_end_matches(']').parse().unwrap();
-    let continued = tools::read_text(&library, "Albert Einstein", Some("Early life"), Some(offset)).unwrap();
+    let continued = tools::read_text(&scope, "Albert Einstein", Some("Early life"), Some(offset)).unwrap();
     assert!(!continued.contains("truncated"), "one continuation is enough for this fixture: {continued}");
 
     // Each call's shape is "{heading} ({total} chars)\n\n<article-text>\n{body}\n</article-text>[…marker]";
@@ -441,11 +477,11 @@ fn read_section_truncates_at_a_char_boundary_and_round_trips_with_offset() {
     let mut joined = body_of(&full).to_string();
     joined.push_str(body_of(&continued));
 
-    let target = match library.resolve_title("Albert Einstein").unwrap() {
+    let target = match scope.library().resolve_title("Albert Einstein").unwrap() {
         Resolution::Found(t) => t,
         Resolution::NotFound { .. } => panic!("fixture article must resolve"),
     };
-    let doc = library.article(target.entry).unwrap();
+    let doc = scope.library().article(target.entry).unwrap();
     let index = tools::resolve_section(&doc, "Early life", true).unwrap();
     let heading = ok_core::text::sanitize(&doc.sections[index].heading);
     let whole = ok_core::text::sanitize(&doc.section_text(index));
@@ -455,8 +491,8 @@ fn read_section_truncates_at_a_char_boundary_and_round_trips_with_offset() {
 
 #[test]
 fn links_deduplicates_counts_unique_missing_and_external() {
-    let (_d, library) = imported();
-    let text = tools::links_text(&library, "Albert Einstein", None).unwrap();
+    let (_d, scope) = imported();
+    let text = tools::links_text(&scope, "Albert Einstein", None).unwrap();
     let lines: Vec<&str> = text.lines().collect();
     assert!(lines[0].starts_with("1 unique articles linked from \"<article-text>Albert Einstein</article-text>\""), "{text}");
     assert!(lines.contains(&"<article-text>Theory of relativity</article-text>"), "{text}");
@@ -466,8 +502,8 @@ fn links_deduplicates_counts_unique_missing_and_external() {
 
 #[test]
 fn links_with_a_section_names_the_section_not_the_article() {
-    let (_d, library) = imported();
-    let text = tools::links_text(&library, "Albert Einstein", Some("Life")).unwrap();
+    let (_d, scope) = imported();
+    let text = tools::links_text(&scope, "Albert Einstein", Some("Life")).unwrap();
     let header = text.lines().next().unwrap();
     assert!(header.contains("linked from \"<article-text>Life</article-text>\""), "{header}");
     assert!(!header.contains("Albert Einstein"), "the section's own name, not the article's: {header}");
@@ -477,7 +513,7 @@ fn links_with_a_section_names_the_section_not_the_article() {
 /// so a linked-to article's title can carry the same forged newline.
 #[test]
 fn links_target_title_collapses_an_embedded_newline_and_is_fenced() {
-    let (_d, library) = library_with(
+    let (_d, scope) = scope_over(
         ZimBuilder::new()
             .article("Home", "Home", &page("Home", r#"<p>See <a href="Target">the target</a>.</p>"#))
             .article("Target", "Two\nLines", &page("Two Lines", "<p>Some prose.</p>"))
@@ -486,15 +522,15 @@ fn links_target_title_collapses_an_embedded_newline_and_is_fenced() {
             .build(),
     );
 
-    let text = tools::links_text(&library, "Home", None).unwrap();
+    let text = tools::links_text(&scope, "Home", None).unwrap();
     assert!(text.contains("<article-text>Two Lines</article-text>"), "{text}");
     assert!(!text.lines().any(|l| l == "Lines"), "an embedded newline must not fake a second title line: {text}");
 }
 
 #[test]
 fn links_unknown_article_is_an_error_with_suggestions() {
-    let (_d, library) = imported();
-    let err = tools::links_text(&library, "Not A Real Title At All", None).unwrap_err();
+    let (_d, scope) = imported();
+    let err = tools::links_text(&scope, "Not A Real Title At All", None).unwrap_err();
     assert!(err.contains("no article titled"), "{err}");
 }
 
@@ -503,10 +539,10 @@ fn links_unknown_article_is_an_error_with_suggestions() {
 // itself (routing, Parameters<T> deserialization, CallToolResult envelope).
 // ---------------------------------------------------------------------
 
-async fn connected_client(library: Library) -> (tokio::task::JoinHandle<()>, rmcp::service::RunningService<rmcp::RoleClient, ()>) {
+async fn connected_client(collections: Arc<Collections>) -> (tokio::task::JoinHandle<()>, rmcp::service::RunningService<rmcp::RoleClient, ()>) {
     let (server_io, client_io) = tokio::io::duplex(8192);
     let server = tokio::spawn(async move {
-        let running = Mcp::new(Arc::new(library)).serve(server_io).await.expect("server serve");
+        let running = Mcp::new(collections).serve(server_io).await.expect("server serve");
         let _ = running.waiting().await;
     });
     let client = ().serve(client_io).await.expect("client serve");
@@ -515,8 +551,8 @@ async fn connected_client(library: Library) -> (tokio::task::JoinHandle<()>, rmc
 
 #[tokio::test]
 async fn list_tools_returns_exactly_three_tools_with_required_fields() {
-    let (_d, library) = imported();
-    let (server, client) = connected_client(library).await;
+    let (_d, collections) = one_collection();
+    let (server, client) = connected_client(collections).await;
 
     let tools = client.list_tools(None).await.unwrap().tools;
     let mut names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
@@ -531,14 +567,22 @@ async fn list_tools_returns_exactly_three_tools_with_required_fields() {
     assert_eq!(required_of("read"), vec!["article"]);
     assert_eq!(required_of("links"), vec!["article"]);
 
+    // `collection` is on every tool and required by none of them: a
+    // single-collection server is called exactly as it was before.
+    for name in ["search", "read", "links"] {
+        let tool = tools.iter().find(|t| t.name == name).unwrap();
+        let property = tool.input_schema.get("properties").and_then(|p| p.get("collection")).unwrap_or_else(|| panic!("{name} has no collection property"));
+        assert!(property.get("description").and_then(|d| d.as_str()).is_some_and(|d| d.contains("label")), "{name}: {property}");
+    }
+
     drop(client);
     server.abort();
 }
 
 #[tokio::test]
 async fn call_tool_search_round_trips_through_rmcp() {
-    let (_d, library) = imported();
-    let (server, client) = connected_client(library).await;
+    let (_d, collections) = one_collection();
+    let (server, client) = connected_client(collections).await;
 
     let mut args = serde_json::Map::new();
     args.insert("query".to_string(), serde_json::json!("Einstein"));
@@ -552,8 +596,8 @@ async fn call_tool_search_round_trips_through_rmcp() {
 
 #[tokio::test]
 async fn call_tool_read_round_trips_through_rmcp() {
-    let (_d, library) = imported();
-    let (server, client) = connected_client(library).await;
+    let (_d, collections) = one_collection();
+    let (server, client) = connected_client(collections).await;
 
     let mut args = serde_json::Map::new();
     args.insert("article".to_string(), serde_json::json!("Albert Einstein"));
@@ -567,8 +611,8 @@ async fn call_tool_read_round_trips_through_rmcp() {
 
 #[tokio::test]
 async fn call_tool_links_round_trips_through_rmcp() {
-    let (_d, library) = imported();
-    let (server, client) = connected_client(library).await;
+    let (_d, collections) = one_collection();
+    let (server, client) = connected_client(collections).await;
 
     let mut args = serde_json::Map::new();
     args.insert("article".to_string(), serde_json::json!("Albert Einstein"));
@@ -582,8 +626,8 @@ async fn call_tool_links_round_trips_through_rmcp() {
 
 #[tokio::test]
 async fn call_tool_unknown_article_is_a_tool_level_error_not_a_protocol_error() {
-    let (_d, library) = imported();
-    let (server, client) = connected_client(library).await;
+    let (_d, collections) = one_collection();
+    let (server, client) = connected_client(collections).await;
 
     let mut args = serde_json::Map::new();
     args.insert("article".to_string(), serde_json::json!("Nonexistent Nowhere Title"));
@@ -593,4 +637,129 @@ async fn call_tool_unknown_article_is_a_tool_level_error_not_a_protocol_error() 
 
     drop(client);
     server.abort();
+}
+
+// ---------------------------------------------------------------------
+// Collections: qualified identifiers, the collection parameter, and what
+// the handshake says is loaded.
+// ---------------------------------------------------------------------
+
+async fn call(client: &rmcp::service::RunningService<rmcp::RoleClient, ()>, tool: &str, args: &[(&str, &str)]) -> (bool, String) {
+    let mut map = serde_json::Map::new();
+    for (key, value) in args {
+        map.insert((*key).to_string(), serde_json::json!(value));
+    }
+    let result = client.call_tool(CallToolRequestParams::new(tool.to_string()).with_arguments(map)).await.unwrap();
+    (result.is_error == Some(true), result.content[0].as_text().unwrap().text.clone())
+}
+
+/// The round trip that matters: what `search` prints is what `read` takes.
+/// The whole identifier sits inside one fence, label included, so the token
+/// an agent copies stays whole.
+#[tokio::test]
+async fn a_search_identifier_carries_its_collection_and_feeds_straight_back_into_read() {
+    let (_d, collections) = two_collections();
+    let (server, client) = connected_client(collections).await;
+
+    let (error, text) = call(&client, "search", &[("query", "Albert Einstein")]).await;
+    assert!(!error, "{text}");
+    assert!(text.lines().next().unwrap().contains("in wikipedia"), "the header names which collection answered: {text}");
+    let line = text.lines().skip(1).find(|l| l.contains("Albert Einstein")).unwrap();
+    assert_eq!(line, "<article-text>wikipedia/Albert Einstein</article-text>", "{text}");
+
+    let identifier = line.trim_start_matches("<article-text>").trim_end_matches("</article-text>");
+    assert_eq!(identifier, "wikipedia/Albert Einstein");
+    let (error, text) = call(&client, "read", &[("article", identifier)]).await;
+    assert!(!error, "{text}");
+    assert!(text.starts_with("<article-text>wikipedia/Albert Einstein</article-text> · "), "{text}");
+
+    let (error, text) = call(&client, "links", &[("article", identifier)]).await;
+    assert!(!error, "{text}");
+    assert!(text.contains("<article-text>wikipedia/Theory of relativity</article-text>"), "a linked title is an identifier too: {text}");
+
+    drop(client);
+    server.abort();
+}
+
+/// The qualifier splits at the first `/` and only when the prefix is a
+/// loaded label, so a title with a slash in it survives; and the explicit
+/// parameter wins over whatever the identifier says.
+#[tokio::test]
+async fn the_qualifier_splits_once_only_on_a_loaded_label_and_the_parameter_overrides_it() {
+    let (_d, collections) = two_collections();
+    let (server, client) = connected_client(collections).await;
+
+    let (error, text) = call(&client, "read", &[("article", "wiktionary/AC/DC")]).await;
+    assert!(!error, "{text}");
+    assert!(text.starts_with("<article-text>wiktionary/AC/DC</article-text> · "), "split at the first slash only: {text}");
+
+    let (error, text) = call(&client, "read", &[("article", "AC/DC"), ("collection", "wiktionary")]).await;
+    assert!(!error, "a title whose first segment is no label is a title: {text}");
+    assert!(text.starts_with("<article-text>wiktionary/AC/DC</article-text> · "), "{text}");
+
+    let (error, text) = call(&client, "read", &[("article", "nosuchlabel/Albert Einstein")]).await;
+    assert!(error, "{text}");
+    assert!(text.contains("no article titled \"nosuchlabel/Albert Einstein\""), "the whole string was taken as a title: {text}");
+
+    let (error, text) = call(&client, "read", &[("article", "wikipedia/Mercury"), ("collection", "wiktionary")]).await;
+    assert!(!error, "the parameter overrides the qualifier: {text}");
+    assert!(text.starts_with("<article-text>wiktionary/Mercury</article-text> · "), "{text}");
+
+    drop(client);
+    server.abort();
+}
+
+/// No collection named at all is the default one, and a collection that is
+/// not loaded is the caller's mistake to fix, with the loaded labels named.
+#[tokio::test]
+async fn an_unnamed_collection_is_the_default_and_an_unknown_one_names_what_is_loaded() {
+    let (_d, collections) = two_collections();
+    let (server, client) = connected_client(collections).await;
+
+    let (error, text) = call(&client, "read", &[("article", "Albert Einstein")]).await;
+    assert!(!error, "{text}");
+    assert!(text.starts_with("<article-text>wikipedia/Albert Einstein</article-text>"), "the default answered, and says so: {text}");
+
+    let (error, text) = call(&client, "search", &[("query", "mercury"), ("collection", "nope")]).await;
+    assert!(error, "{text}");
+    assert!(text.contains("no collection labeled \"nope\""), "{text}");
+    assert!(text.contains("wikipedia") && text.contains("wiktionary"), "it lists what is loaded: {text}");
+
+    // Scoping: a title only the other collection has is a miss here.
+    let (error, text) = call(&client, "read", &[("article", "Mercury"), ("collection", "wikipedia")]).await;
+    assert!(error, "no cross-collection fallback: {text}");
+
+    drop(client);
+    server.abort();
+}
+
+/// Sent once at handshake, so an agent knows what it can ask for without
+/// spending a tool call on it.
+#[test]
+fn the_instructions_list_every_collection_with_its_label_title_and_count() {
+    let (_d, collections) = two_collections();
+    let info = Mcp::new(collections).get_info();
+    let instructions = info.instructions.clone().unwrap_or_default();
+    assert!(instructions.contains("Collections loaded:"), "{instructions}");
+    let wikipedia = instructions.lines().find(|l| l.starts_with("wikipedia · ")).unwrap_or_default();
+    assert!(wikipedia.contains("Tiny wiki") && wikipedia.contains("articles") && wikipedia.contains("(default)"), "{instructions}");
+    let wiktionary = instructions.lines().find(|l| l.starts_with("wiktionary · ")).unwrap_or_default();
+    assert!(wiktionary.contains("Tiny dictionary") && wiktionary.contains("articles"), "{instructions}");
+    assert!(instructions.contains("label/Title"), "and how to name one: {instructions}");
+}
+
+/// One collection: a bare title is unambiguous, so nothing is qualified and
+/// the output is what it was before collections existed.
+#[test]
+fn one_collection_qualifies_nothing() {
+    let (_d, scope) = imported();
+    let text = tools::read_text(&scope, "Albert Einstein", None, None).unwrap();
+    assert!(text.starts_with("<article-text>Albert Einstein</article-text> · "), "{text}");
+    assert!(!text.contains("wikipedia/"), "{text}");
+    let text = tools::search_text(&scope, "einstein", 8).unwrap();
+    assert!(!text.contains(" in wikipedia"), "and the header names no collection either: {text}");
+
+    let (_d, collections) = one_collection();
+    let instructions = Mcp::new(collections).get_info().instructions.clone().unwrap_or_default();
+    assert!(!instructions.contains("label/Title"), "nor is there a qualifier to explain: {instructions}");
 }
