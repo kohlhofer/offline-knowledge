@@ -48,7 +48,22 @@ impl Scope {
         }
         self.collections.at(self.index)?.label().ok().map(|l| l.as_str())
     }
+
+    /// The other collections holding an article with exactly this title, at
+    /// most three and in load order. Unscored, and computed only on a miss:
+    /// it opens each candidate's title index and nothing else.
+    pub fn elsewhere(&self, query: &str) -> Vec<&str> {
+        self.collections
+            .exact_elsewhere(self.index, query)
+            .into_iter()
+            .filter_map(|collection| collection.label().ok().map(|label| label.as_str()))
+            .take(MAX_HINTS)
+            .collect()
+    }
 }
+
+/// How many other collections a miss names before the message gets long.
+const MAX_HINTS: usize = 3;
 
 const SEARCH_SUMMARY_CHARS: usize = 140;
 const MAX_SECTION_CHARS: usize = 6000;
@@ -132,7 +147,9 @@ pub fn search_text(scope: &Scope, query: &str, limit: usize) -> Result<String, S
     }
 
     lines.truncate(limit);
-    let header = search_header(lines.len(), limit, query, scope.label());
+    // Only on a zero-hit search, and only an exact-title probe.
+    let elsewhere = if lines.is_empty() { scope.elsewhere(query) } else { Vec::new() };
+    let header = search_header(lines.len(), limit, query, scope.label(), &elsewhere);
     Ok(std::iter::once(header).chain(lines).collect::<Vec<_>>().join("\n"))
 }
 
@@ -151,13 +168,17 @@ pub fn search_text(scope: &Scope, query: &str, limit: usize) -> Result<String, S
 /// `collection`, when the process holds more than one, names which one
 /// answered — the header is the only line a search response has to say it
 /// on, and every identifier under it carries the same label.
-pub(super) fn search_header(shown: usize, limit: usize, query: &str, collection: Option<&str>) -> String {
+pub(super) fn search_header(shown: usize, limit: usize, query: &str, collection: Option<&str>, elsewhere: &[&str]) -> String {
     let subject = match collection {
         Some(label) => format!("\"{}\" in {label}", sanitize(query)),
         None => format!("\"{}\"", sanitize(query)),
     };
     if shown == 0 {
-        format!("0 shown for {subject} — try different words, or fewer of them")
+        let mut header = format!("0 shown for {subject} — try different words, or fewer of them");
+        if let Some((names, verb)) = hint(elsewhere) {
+            header.push_str(&format!("; {names} {verb} a page with that exact title, call search with collection=\"{}\"", elsewhere[0]));
+        }
+        header
     } else if shown == limit {
         format!("{shown} shown for {subject} — more may exist, call search again with a higher limit")
     } else {
@@ -180,7 +201,7 @@ pub(super) fn search_header(shown: usize, limit: usize, query: &str, collection:
 /// article actually has.
 pub fn read_text(scope: &Scope, article: &str, section: Option<&str>, offset: Option<usize>) -> Result<String, String> {
     let library = scope.library();
-    let target = resolve_article(library, article)?;
+    let target = resolve_article(scope, article)?;
     let doc = library.article(target.entry).map_err(|e| lookup_error(article, e))?;
     let note = redirect_note(scope, article, &doc.title);
     let (spec, from_redirect) = match section {
@@ -221,7 +242,7 @@ fn redirect_note(scope: &Scope, requested: &str, canonical_title: &str) -> Optio
 /// repeated nav/infobox link to the same missing target doesn't inflate it.
 pub fn links_text(scope: &Scope, article: &str, section: Option<&str>) -> Result<String, String> {
     let library = scope.library();
-    let target = resolve_article(library, article)?;
+    let target = resolve_article(scope, article)?;
     let doc = library.article(target.entry).map_err(|e| lookup_error(article, e))?;
     let note = redirect_note(scope, article, &doc.title);
     let (spec, from_redirect) = match section {
@@ -288,13 +309,13 @@ pub fn links_text(scope: &Scope, article: &str, section: Option<&str>) -> Result
 /// title or path is anywhere near this long.
 const MAX_ARTICLE_CHARS: usize = 200;
 
-fn resolve_article(library: &Library, article: &str) -> Result<ok_core::Target, String> {
+fn resolve_article(scope: &Scope, article: &str) -> Result<ok_core::Target, String> {
     if article.chars().count() > MAX_ARTICLE_CHARS {
         return Err(format!("article accepts at most {MAX_ARTICLE_CHARS} characters"));
     }
-    match library.resolve_title(article) {
+    match scope.library().resolve_title(article) {
         Ok(Resolution::Found(target)) => Ok(target),
-        Ok(Resolution::NotFound { suggestions, fallback_prefix }) => Err(not_found_message(article, &suggestions, fallback_prefix.as_deref())),
+        Ok(Resolution::NotFound { suggestions, fallback_prefix }) => Err(not_found_message(scope, article, &suggestions, fallback_prefix.as_deref())),
         Err(e) => Err(lookup_error(article, e)),
     }
 }
@@ -302,16 +323,34 @@ fn resolve_article(library: &Library, article: &str) -> Result<ok_core::Target, 
 /// `fallback_prefix`, when present, names the shortened prefix `suggestions`
 /// actually matched — said explicitly, so a fallback batch doesn't read as
 /// if it answered `article` as typed.
-fn not_found_message(article: &str, suggestions: &[Suggestion], fallback_prefix: Option<&str>) -> String {
-    let article = sanitize(article);
+fn not_found_message(scope: &Scope, article: &str, suggestions: &[Suggestion], fallback_prefix: Option<&str>) -> String {
+    let miss = match scope.label() {
+        Some(label) => format!("no article titled \"{}\" in {label}", sanitize(article)),
+        None => format!("no article titled \"{}\"", sanitize(article)),
+    };
+    // An exact title in another collection is a better next step than any
+    // fuzzy title in this one, and it keeps the message to one clause.
+    let elsewhere = scope.elsewhere(article);
+    if let Some((names, verb)) = hint(&elsewhere) {
+        return format!("{miss} — {names} {verb} it; call read with collection=\"{}\"", elsewhere[0]);
+    }
     if suggestions.is_empty() {
-        return format!("no article titled \"{article}\" — call search");
+        return format!("{miss} — call search");
     }
     let names: Vec<String> = suggestions.iter().take(MAX_SUGGESTIONS).map(|s| format!("\"{}\"", sanitize(&s.title))).collect();
     match fallback_prefix {
-        Some(prefix) => format!("no article titled \"{article}\" — titles starting with \"{}\": {}, or call search", sanitize(prefix), names.join(", ")),
-        None => format!("no article titled \"{article}\" — try: {}, or call search", names.join(", ")),
+        Some(prefix) => format!("{miss} — titles starting with \"{}\": {}, or call search", sanitize(prefix), names.join(", ")),
+        None => format!("{miss} — try: {}, or call search", names.join(", ")),
     }
+}
+
+/// The names and the verb a miss hint needs, or `None` when no other
+/// collection has the title.
+fn hint(elsewhere: &[&str]) -> Option<(String, &'static str)> {
+    if elsewhere.is_empty() {
+        return None;
+    }
+    Some((elsewhere.join(", "), if elsewhere.len() == 1 { "has" } else { "have" }))
 }
 
 /// Never shown to the caller: entry indices and filesystem paths stay in

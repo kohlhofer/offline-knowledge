@@ -873,3 +873,25 @@ async fn a_failed_collection_answers_503_naming_only_its_label() {
     assert_eq!(get(&app, "/wikipedia/Albert_Einstein").await.status(), StatusCode::OK);
     assert_eq!(get(&app, "/search?q=physics&c=wiktionary").await.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
+
+/// The one cross-collection read anything does: an unscored, exact-title
+/// probe on a miss. The title index stores normalized keys, so the hint
+/// echoes the reader's own path rather than a display title, and the link
+/// lets that collection canonicalise it on the way in.
+#[tokio::test]
+async fn a_404_names_another_collection_that_has_the_title() {
+    let (_d, app) = app_two();
+
+    let res = get(&app, "/wikipedia/Mercury").await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let body = body_text(res).await;
+    assert!(body.contains(r#"<p class="elsewhere"><a href="/wiktionary/Mercury">wiktionary</a> has a page with this title.</p>"#), "{body}");
+
+    // A prefix-only match is not a match: "Merc" must not fire the hint.
+    let body = body_text(get(&app, "/wikipedia/Merc").await).await;
+    assert!(!body.contains("elsewhere"), "{body}");
+
+    // Nor does a title no other collection has.
+    let body = body_text(get(&app, "/wikipedia/Zzznotathing").await).await;
+    assert!(!body.contains("elsewhere"), "{body}");
+}

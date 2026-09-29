@@ -478,6 +478,10 @@ article pre {
 
 /* Not-found and error pages */
 
+.not-found .elsewhere {
+  color: var(--dim);
+}
+
 .not-found .suggestions,
 .error {
   margin-top: 1rem;

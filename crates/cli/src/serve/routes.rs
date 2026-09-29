@@ -375,7 +375,10 @@ pub async fn article(
             (StatusCode::FOUND, [(header::LOCATION, location), (header::CACHE_CONTROL, "no-store".to_string())]).into_response()
         }
         ArticleOutcome::NotFound { suggestions, fallback_prefix } => {
-            let body = page::not_found_body(&active, &path, &suggestions, fallback_prefix.as_deref());
+            // Only on a miss, and only an exact-title probe: the one
+            // cross-collection read anything here does.
+            let elsewhere = active.elsewhere(&path);
+            let body = page::not_found_body(&active, &path, &suggestions, fallback_prefix.as_deref(), &elsewhere);
             let body = page::shell("Not found", Some(&active), None, &body);
             (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-cache")], Html(body))
                 .into_response()

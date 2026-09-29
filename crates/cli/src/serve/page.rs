@@ -45,7 +45,24 @@ impl<'a> Active<'a> {
     pub fn brand(&self) -> &'a str {
         self.collection().title()
     }
+
+    /// The other collections holding an article with exactly this title, at
+    /// most three and in load order. Unscored: it exists to add "wiktionary
+    /// has it" to a miss, not to rank anything. Opens each candidate's title
+    /// index and nothing else.
+    pub fn elsewhere(&self, query: &str) -> Vec<&'a str> {
+        self.collections
+            .exact_elsewhere(self.index, query)
+            .into_iter()
+            .filter_map(|collection| collection.label().ok().map(|label| label.as_str()))
+            .take(MAX_HINTS)
+            .collect()
+    }
 }
+
+/// How many other collections a miss names. Three is enough to be useful
+/// and short enough to stay one sentence.
+const MAX_HINTS: usize = 3;
 
 /// The hidden field that carries the active collection out of a
 /// server-rendered form. Without it a reader on a non-default collection
@@ -295,7 +312,18 @@ pub struct SuggestionRow {
 /// work with no JS. `fallback_prefix`, when present, names the shortened
 /// prefix `suggestions` actually matched — said explicitly, so a fallback
 /// batch doesn't read as if it answered `requested_path` as typed.
-pub fn not_found_body(active: &Active, requested_path: &str, suggestions: &[SuggestionRow], fallback_prefix: Option<&str>) -> String {
+/// `elsewhere` names the collections that do have an article with exactly
+/// this title. The title index stores normalized keys, so there is no
+/// display title to recover: the link is to the reader's own path, which
+/// that collection's `resolve_title` canonicalises on the way in, exactly as
+/// a `/{collection}/{title}` link always has.
+pub fn not_found_body(
+    active: &Active,
+    requested_path: &str,
+    suggestions: &[SuggestionRow],
+    fallback_prefix: Option<&str>,
+    elsewhere: &[&str],
+) -> String {
     let display = requested_path.replace('_', " ");
     let suggestion_list = if suggestions.is_empty() {
         String::new()
@@ -310,14 +338,28 @@ pub fn not_found_body(active: &Active, requested_path: &str, suggestions: &[Sugg
         };
         format!(r#"<p>{lead}</p><ul class="suggestions">{items}</ul>"#)
     };
+    let hint = if elsewhere.is_empty() {
+        String::new()
+    } else {
+        let links: Vec<String> = elsewhere
+            .iter()
+            .map(|label| {
+                format!(r#"<a href="{href}">{label}</a>"#, href = esc(&ok_core::html::article_href(&format!("/{label}"), requested_path, None)))
+            })
+            .collect();
+        let verb = if links.len() == 1 { "has" } else { "have" };
+        format!(r#"<p class="elsewhere">{} {verb} a page with this title.</p>"#, links.join(", "))
+    };
     format!(
         r#"<section class="not-found">
 <h1>"{display}" is not in this collection</h1>
+{hint}
 {suggestion_list}
 <form action="/search" method="get"><input type="hidden" name="q" value="{display}">{collection_input}<button type="submit">Search all text for "{display}"</button></form>
 </section>"#,
         display = esc(&display),
         collection_input = collection_field(active.label()),
+        hint = hint,
         suggestion_list = suggestion_list,
     )
 }

@@ -25,6 +25,8 @@ const SIDEBAR_WIDTH: u16 = 34;
 const SIDEBAR_GAP: u16 = 3;
 const SIDEBAR_MIN_TERMINAL: u16 = 118;
 const MIN_TEXT_WITH_SIDEBAR: u16 = 40;
+/// How many other collections a miss names before the status line gets long.
+const MAX_HINTS: usize = 3;
 
 pub fn run(collections: Arc<Collections>) -> Result<()> {
     // Before the terminal goes into raw mode: a library that cannot be
@@ -153,6 +155,19 @@ impl App {
             return None;
         }
         self.collections.at(self.active)?.label().ok().map(|l| l.as_str())
+    }
+
+    /// The other collections holding an article with exactly this title, at
+    /// most three. Unscored, and computed only on a miss: it opens each
+    /// candidate's title index and nothing else.
+    fn elsewhere(&self, query: &str) -> Vec<String> {
+        self.collections
+            .exact_elsewhere(self.active, query)
+            .into_iter()
+            .filter_map(|collection| collection.label().ok())
+            .map(|label| label.to_string())
+            .take(MAX_HINTS)
+            .collect()
     }
 
     /// The infobox column, when the reader wants it and the terminal is wide enough.
@@ -292,7 +307,15 @@ impl App {
         let started = Instant::now();
         match self.library.search(&self.query, RESULTS) {
             Ok(r) => {
-                self.status = if r.is_empty() { format!("no articles mention \"{}\"", self.query) } else { String::new() };
+                self.status = if r.is_empty() {
+                    let miss = format!("no articles mention \"{}\"", self.query);
+                    match hint(&self.elsewhere(&self.query)) {
+                        Some(hint) => format!("{miss} · {hint}"),
+                        None => miss,
+                    }
+                } else {
+                    String::new()
+                };
                 self.results = r;
                 self.selected = self.suggestions.len();
             }
@@ -460,7 +483,14 @@ impl App {
                 Some(line) => view.scroll = line,
                 None => self.status = format!("no section \"{fragment}\" here"),
             },
-            Link::Missing { path } => self.status = format!("\"{}\" is not in this collection", path.replace('_', " ")),
+            Link::Missing { path } => {
+                let miss = format!("\"{}\" is not in this collection", path.replace('_', " "));
+                let elsewhere = self.elsewhere(&path);
+                self.status = match hint(&elsewhere) {
+                    Some(hint) => format!("{miss} · {hint}"),
+                    None => miss,
+                };
+            }
             Link::External { url } => self.status = format!("external link (offline): {}", layout::sanitize(&url)),
         }
     }
@@ -532,6 +562,16 @@ impl App {
             self.status.clear();
         }
     }
+}
+
+/// "wiktionary has it (Ctrl-T)": what a miss adds when another collection
+/// holds an article with exactly that title, naming the key that switches.
+fn hint(elsewhere: &[String]) -> Option<String> {
+    if elsewhere.is_empty() {
+        return None;
+    }
+    let verb = if elsewhere.len() == 1 { "has" } else { "have" };
+    Some(format!("{} {verb} it (Ctrl-T)", elsewhere.join(", ")))
 }
 
 /// Moves the link selection forward or back, starting from the first visible

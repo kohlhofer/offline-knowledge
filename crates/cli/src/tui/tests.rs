@@ -81,7 +81,13 @@ fn two_collections() -> (tempfile::TempDir, App) {
         dir.path(),
         "a.zim",
         ZimBuilder::new()
-            .article("Albert_Einstein", "Albert Einstein", &page("Albert Einstein", r#"<p>A <a href="Physicist">physicist</a>.</p>"#))
+            .article(
+                "Albert_Einstein",
+                "Albert Einstein",
+                // The second link is to a title only the other collection
+                // has: the miss hint's own fixture.
+                &page("Albert Einstein", r#"<p>A <a href="Physicist">physicist</a>, and not <a href="Mercury">Mercury</a>.</p>"#),
+            )
             .article("Physicist", "Physicist", &page("Physicist", "<p>Studies physics.</p>"))
             .metadata("Title", "Tiny wiki")
             .metadata("Name", "wikipedia_en_top")
@@ -93,6 +99,9 @@ fn two_collections() -> (tempfile::TempDir, App) {
         "b.zim",
         ZimBuilder::new()
             .article("Mercury", "Mercury", &page("Mercury", "<p>A metal, and a planet.</p>"))
+            // A title the other collection does not mention anywhere, for
+            // the zero-hit half of the miss hint.
+            .article("Venus", "Venus", &page("Venus", "<p>The second planet.</p>"))
             .metadata("Title", "Tiny dictionary")
             .metadata("Name", "wiktionary_en-simple_all")
             .metadata("Scraper", "mwoffliner 1.17.5")
@@ -422,7 +431,7 @@ fn ctrl_t_opens_a_picker_of_every_collection_and_esc_changes_nothing() {
     let text = screen(&mut app);
     assert!(text.contains("Collections · 2"), "{text}");
     assert!(text.contains("wikipedia · Tiny wiki · 2 articles"), "label, title and count: {text}");
-    assert!(text.contains("wiktionary · Tiny dictionary · 1 articles"), "{text}");
+    assert!(text.contains("wiktionary · Tiny dictionary · 2 articles"), "{text}");
 
     press(&mut app, KeyCode::Esc);
     assert_eq!(app.overlay, Overlay::None);
@@ -602,4 +611,39 @@ fn dump_screens_for_review() {
             dump(&mut app, w, h, "10_status_after_external_link");
         }
     }
+}
+
+/// A missing link, and a search that found nothing, both say which other
+/// collection has that exact title, and which key gets there.
+#[test]
+fn a_miss_names_another_collection_that_has_the_title() {
+    let (_d, mut app) = two_collections();
+
+    // A link to a title this collection does not have.
+    type_text(&mut app, "alb");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Enter);
+    assert!(app.status.starts_with("\"Mercury\" is not in this collection"), "{}", app.status);
+    assert!(app.status.contains("wiktionary has it (Ctrl-T)"), "{}", app.status);
+
+    // And a full-text search that found nothing. "Mercury" itself is a
+    // link in this collection, so its text does mention it; "Venus" is a
+    // title only the other collection has.
+    press(&mut app, KeyCode::Char('/'));
+    type_text(&mut app, "Venus");
+    press(&mut app, KeyCode::Tab);
+    assert!(app.status.starts_with("no articles mention"), "{}", app.status);
+    assert!(app.status.contains("wiktionary has it (Ctrl-T)"), "{}", app.status);
+
+    // A prefix-only match is not a match, and neither is a title nobody has.
+    app.set_query(String::new());
+    type_text(&mut app, "Merc");
+    press(&mut app, KeyCode::Tab);
+    assert!(!app.status.contains("Ctrl-T"), "{}", app.status);
+    app.set_query(String::new());
+    type_text(&mut app, "zzznotathing");
+    press(&mut app, KeyCode::Tab);
+    assert!(!app.status.contains("Ctrl-T"), "{}", app.status);
 }

@@ -164,12 +164,12 @@ fn search_empty_query_is_an_error() {
 
 #[test]
 fn search_header_names_the_next_step_or_that_more_may_exist() {
-    assert_eq!(tools::search_header(0, 5, "zzz", None), "0 shown for \"zzz\" — try different words, or fewer of them");
+    assert_eq!(tools::search_header(0, 5, "zzz", None, &[]), "0 shown for \"zzz\" — try different words, or fewer of them");
     // Under the cap: no total is claimed, truncated or not.
-    assert_eq!(tools::search_header(2, 5, "x", None), "2 shown for \"x\"");
+    assert_eq!(tools::search_header(2, 5, "x", None, &[]), "2 shown for \"x\"");
     // At the cap: never a specific total (neither query result is a real
     // corpus count), just an honest "more may exist" either way.
-    assert_eq!(tools::search_header(5, 5, "x", None), "5 shown for \"x\" — more may exist, call search again with a higher limit");
+    assert_eq!(tools::search_header(5, 5, "x", None, &[]), "5 shown for \"x\" — more may exist, call search again with a higher limit");
 }
 
 #[test]
@@ -762,4 +762,26 @@ fn one_collection_qualifies_nothing() {
     let (_d, collections) = one_collection();
     let instructions = Mcp::new(collections).get_info().instructions.clone().unwrap_or_default();
     assert!(!instructions.contains("label/Title"), "nor is there a qualifier to explain: {instructions}");
+}
+
+/// A miss says which other collection has that exact title and how to ask
+/// it, on both the `read` and the zero-hit `search` paths.
+#[test]
+fn a_miss_names_another_collection_that_has_the_title() {
+    let (_d, collections) = two_collections();
+    let scope = tools::Scope::new(Arc::clone(&collections), 0).unwrap();
+
+    let err = tools::read_text(&scope, "Mercury", None, None).unwrap_err();
+    assert!(err.starts_with("no article titled \"Mercury\" in wikipedia"), "{err}");
+    assert!(err.contains("wiktionary has it; call read with collection=\"wiktionary\""), "{err}");
+
+    let header = tools::search_text(&scope, "Mercury", 8).unwrap();
+    assert!(header.starts_with("0 shown for \"Mercury\" in wikipedia"), "{header}");
+    assert!(header.contains("wiktionary has a page with that exact title, call search with collection=\"wiktionary\""), "{header}");
+
+    // A prefix-only match is not a match, and neither is a title nobody has.
+    let err = tools::read_text(&scope, "Merc", None, None).unwrap_err();
+    assert!(!err.contains("wiktionary"), "{err}");
+    let err = tools::read_text(&scope, "Zzznotathing", None, None).unwrap_err();
+    assert!(!err.contains("wiktionary"), "{err}");
 }
