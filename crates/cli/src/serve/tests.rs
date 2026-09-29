@@ -707,7 +707,34 @@ async fn an_article_is_scoped_to_the_collection_in_its_url() {
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
     let body = body_text(res).await;
     assert!(body.contains("404 Not Found") && body.contains("nosuchthing"), "{body}");
+    assert!(body.contains("wikipedia, wiktionary"), "and it names what is loaded, as the CLI and MCP do: {body}");
 }
+
+/// With one collection loaded there is nothing for a first path segment to
+/// disambiguate, so a URL trimmed to its article — or written before
+/// collections existed — redirects into the only collection there is
+/// instead of 404ing about a word the UI never shows.
+#[tokio::test]
+async fn an_unknown_first_segment_redirects_into_the_only_collection_loaded() {
+    let (_d, app) = app();
+
+    let res = get(&app, "/Albert_Einstein").await;
+    assert_eq!(res.status(), StatusCode::FOUND);
+    assert_eq!(res.headers().get("location").unwrap(), "/wikipedia/Albert_Einstein");
+
+    // Every segment comes along, and each one is percent-encoded once.
+    let res = get(&app, "/Einstein/Life%20and%20work").await;
+    assert_eq!(res.status(), StatusCode::FOUND);
+    assert_eq!(res.headers().get("location").unwrap(), "/wikipedia/Einstein/Life%20and%20work");
+
+    // The redirect is not a claim the article exists: the collection's own
+    // route answers that.
+    let res = get(&app, "/Zzznotathing").await;
+    assert_eq!(res.status(), StatusCode::FOUND);
+    assert_eq!(res.headers().get("location").unwrap(), "/wikipedia/Zzznotathing");
+    assert_eq!(get(&app, "/wikipedia/Zzznotathing").await.status(), StatusCode::NOT_FOUND);
+}
+
 
 /// `?c=` scopes every ranked list a page can ask for, and the chrome around
 /// it: the brand, the placeholder and the way home all come from `c`, not
@@ -766,7 +793,7 @@ async fn home_lists_every_collection_and_the_files_that_could_not_be_loaded() {
     assert!(body.contains(r#"<a href="/wiktionary">wiktionary</a>"#), "{body}");
     assert!(body.contains("Tiny dictionary") && body.contains("2 articles"), "{body}");
     assert!(body.contains("Not loaded") && body.contains("stray.zim"), "{body}");
-    assert!(body.contains("ok collections"), "and where the reason is: {body}");
+    assert!(body.contains("no index yet") && body.contains("ok import"), "the class of reason, not a shell to run: {body}");
     assert!(!body.contains(&dir.path().display().to_string()), "no filesystem path in a response body: {body}");
 
     let (_d, app) = app();

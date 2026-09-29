@@ -15,7 +15,8 @@ mod stubs;
 pub mod text;
 mod titles;
 
-pub use collections::{Collection, Collections, Label, Skipped};
+pub use collections::{Collection, Collections, Label, SkipKind, Skipped};
+
 pub use document::{Document, Target};
 pub use error::{Error, Result};
 pub use library::{Library, Resolution, SearchResult, Suggestion};

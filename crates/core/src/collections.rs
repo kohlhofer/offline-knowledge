@@ -106,7 +106,10 @@ pub struct Collection {
     /// nearly all of the cost. Against a 0.20 ms suggestion that is not
     /// something a one-shot `ok suggest` should pay, so a single-collection
     /// invocation resolves no label at all.
-    label: OnceLock<std::result::Result<Label, Arc<str>>>,
+    /// The failure carries its own class as well as its message: an `Error`
+    /// is not `Clone`, and the class is what a browser page shows in place
+    /// of a reason that names a filesystem path.
+    label: OnceLock<std::result::Result<Label, (Arc<str>, SkipKind)>>,
     /// Lazy, and the failure is cached with it: [`Library::open`] reads
     /// `inbound.u32` and `stubs.bin`, mmaps the title FST and opens
     /// Tantivy, and a collection whose ZIM no longer matches its index must
@@ -164,10 +167,17 @@ impl Collection {
     /// predates [`IndexMeta`] recording it. Cached either way, the failure
     /// included.
     pub fn label(&self) -> Result<&Label> {
-        match self.label.get_or_init(|| self.read_label().map_err(|e| Arc::from(e.to_string()))) {
+        match self.resolved_label() {
             Ok(label) => Ok(label),
-            Err(reason) => Err(Error::CollectionFailed { reason: reason.to_string() }),
+            Err((reason, _)) => Err(Error::CollectionFailed { reason: reason.to_string() }),
         }
+    }
+
+    /// The cached label resolution, failure class included: what
+    /// [`keep_unique_labels`] needs to report a skip the way every other one
+    /// is reported.
+    fn resolved_label(&self) -> &std::result::Result<Label, (Arc<str>, SkipKind)> {
+        self.label.get_or_init(|| self.read_label().map_err(|e| (Arc::from(e.to_string()), SkipKind::of(&e))))
     }
 
     fn read_label(&self) -> Result<Label> {
@@ -214,18 +224,81 @@ impl Collection {
     }
 }
 
+/// What class of problem a skipped path has. [`Skipped::reason`] names the
+/// file's own path, which a response body must not carry, so a browser page
+/// renders this instead of the reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkipKind {
+    /// Nothing has imported the file yet: the commonest one by far, since
+    /// `/data` gains files.
+    NotImported,
+    /// A ZIM mwoffliner did not write.
+    Scraper,
+    /// The label this file derives is already another file's, named here by
+    /// its filename alone.
+    Duplicate { label: String, winner: String },
+    /// An unusable `Name`, an index this version cannot read, an index that
+    /// no longer describes its ZIM.
+    Unusable,
+}
+
+impl SkipKind {
+    fn of(error: &Error) -> SkipKind {
+        match error {
+            Error::NotImported(_) => SkipKind::NotImported,
+            Error::UnsupportedScraper { .. } => SkipKind::Scraper,
+            _ => SkipKind::Unusable,
+        }
+    }
+}
+
 /// A path [`Collections::open`] could not load, and why.
 pub struct Skipped {
     pub path: PathBuf,
     /// Already sanitized and length-capped: safe to print as one line.
     pub reason: String,
+    pub kind: SkipKind,
 }
 
 impl Skipped {
     fn new(path: &Path, error: &Error) -> Skipped {
-        Skipped { path: path.to_path_buf(), reason: text::sanitize_line(&error.to_string()) }
+        Skipped { path: path.to_path_buf(), reason: reason_line(path, &error.to_string()), kind: SkipKind::of(error) }
+    }
+
+    /// A label that could not be resolved. Its `Error` became a message and
+    /// a class when [`Collection::label`] cached it, an `Error` being neither
+    /// `Clone` nor something a cached failure can hand back twice.
+    fn from_label(path: &Path, reason: &str, kind: SkipKind) -> Skipped {
+        Skipped { path: path.to_path_buf(), reason: reason_line(path, reason), kind }
     }
 }
+
+/// A failure as one line, with the path stripped off its front: every line
+/// that reports a skip names the file itself, and `NotImported`'s message
+/// otherwise repeats a 110-character absolute path three times over.
+fn reason_line(path: &Path, message: &str) -> String {
+    let reason = text::sanitize_line(message);
+    let named = format!("{} ", show_path(path));
+    reason.strip_prefix(&named).unwrap_or(&reason).to_string()
+}
+
+
+/// A path on its way into a reason or an error message.
+fn show_path(path: &Path) -> String {
+    text::sanitize_line(&path.display().to_string())
+}
+
+/// The skipped paths on their way into an error that carries no set to
+/// report them on. `ok --zim fake.zim suggest x` is the commonest first-run
+/// mistake there is: without this it says only that nothing loaded.
+fn skipped_note(skipped: &[Skipped]) -> String {
+    match skipped {
+        [] => String::new(),
+        [one] => format!(" — skipped {}: {}", show_path(&one.path), one.reason),
+        many => many.iter().map(|s| format!("\n  skipped {}: {}", show_path(&s.path), s.reason)).collect(),
+    }
+}
+
 
 /// The loaded set. One collection is the default; a frontend makes exactly
 /// one of them active.
@@ -258,10 +331,10 @@ impl Collections {
         // index predates `IndexMeta.name`.
         let collections = if loaded.len() > 1 { keep_unique_labels(loaded, &mut skipped) } else { loaded };
         if collections.is_empty() {
-            return Err(Error::NoCollections);
+            return Err(Error::NoCollections { skipped: skipped_note(&skipped) });
         }
         let default_index = match default_label {
-            Some(wanted) => index_of_label(&collections, wanted)?,
+            Some(wanted) => index_of_label(&collections, wanted, &skipped)?,
             None => 0,
         };
         Ok(Collections { collections, skipped, default_index })
@@ -328,17 +401,23 @@ impl Collections {
 fn keep_unique_labels(loaded: Vec<Collection>, skipped: &mut Vec<Skipped>) -> Vec<Collection> {
     let mut kept: Vec<Collection> = Vec::new();
     for collection in loaded {
-        let label = match collection.label() {
+        let label = match collection.resolved_label() {
             Ok(label) => label.clone(),
-            Err(e) => {
-                skipped.push(Skipped::new(&collection.zim_path, &e));
+            Err((reason, kind)) => {
+                skipped.push(Skipped::from_label(&collection.zim_path, reason, kind.clone()));
                 continue;
             }
         };
+
         match kept.iter().find(|k| k.label().is_ok_and(|kept| *kept == label)) {
             Some(first) => {
-                let reason = format!("the label \"{label}\" is already taken by {}", first.zim_path.display());
-                skipped.push(Skipped { path: collection.zim_path.clone(), reason: text::sanitize_line(&reason) });
+                let reason = format!("the label \"{label}\" is already taken by {}", show_path(&first.zim_path));
+                let winner = first.zim_path.file_name().unwrap_or(first.zim_path.as_os_str()).to_string_lossy().to_string();
+                skipped.push(Skipped {
+                    path: collection.zim_path.clone(),
+                    reason: text::sanitize_line(&reason),
+                    kind: SkipKind::Duplicate { label: label.to_string(), winner: text::sanitize_line(&winner) },
+                });
             }
             None => kept.push(collection),
         }
@@ -348,12 +427,13 @@ fn keep_unique_labels(loaded: Vec<Collection>, skipped: &mut Vec<Skipped>) -> Ve
 
 /// Resolving a wanted label forces every label, which is the point: a
 /// single collection's is otherwise never read.
-fn index_of_label(collections: &[Collection], wanted: &str) -> Result<usize> {
+fn index_of_label(collections: &[Collection], wanted: &str, skipped: &[Skipped]) -> Result<usize> {
     for (i, collection) in collections.iter().enumerate() {
         if collection.label()?.as_str() == wanted {
             return Ok(i);
         }
     }
     let loaded = collections.iter().filter_map(|c| c.label().ok()).map(Label::to_string).collect::<Vec<_>>().join(", ");
-    Err(Error::UnknownCollection { label: echo(wanted), loaded })
+    Err(Error::UnknownCollection { label: echo(wanted), loaded, skipped: skipped_note(skipped) })
 }
+

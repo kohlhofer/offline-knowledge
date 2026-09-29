@@ -5,7 +5,8 @@
 //! `ok_core::html` follows for article bodies.
 
 use ok_core::text::sanitize;
-use ok_core::{Collection, Collections, Label};
+use ok_core::{Collection, Collections, Label, SkipKind, Skipped};
+
 use serde::Serialize;
 
 /// Sanitizes control characters, then HTML-escapes. Every piece of text this
@@ -190,26 +191,33 @@ pub fn collections_body(active: &Active) -> String {
             ))
         })
         .collect();
-    // The file's own name and nothing else: every reason names the path
-    // `--zim` was given, and a response body is no place for the server's
-    // filesystem layout. The startup log and `ok collections` carry it.
-    let skipped: String = active
-        .collections
-        .skipped()
-        .iter()
-        .map(|s| {
-            format!(
-                r#"<li><span class="file">{file}</span> <span class="reason">not loaded; run <code>ok collections</code> for the reason</span></li>"#,
-                file = esc(&s.path.file_name().unwrap_or(s.path.as_os_str()).to_string_lossy()),
-            )
-        })
-        .collect();
+    let skipped: String = active.collections.skipped().iter().map(skipped_row).collect();
     let not_loaded = if skipped.is_empty() {
         String::new()
     } else {
         format!(r#"<h2>Not loaded</h2><ul class="skipped">{skipped}</ul>"#)
     };
     format!(r#"<section class="collections"><h1>Collections</h1><ul class="collection-list">{rows}</ul>{not_loaded}</section>"#)
+}
+
+/// One "not loaded" row: the file's own name and the class of problem. Not
+/// the reason itself — every reason names the path `--zim` was given, and a
+/// response body is no place for the server's filesystem layout, while
+/// "run `ok collections` for the reason" points a browser reader at a shell
+/// they may not have. The startup log and `ok collections` carry the detail.
+fn skipped_row(skipped: &Skipped) -> String {
+    let reason = match &skipped.kind {
+        SkipKind::NotImported => "no index yet; run <code>ok import</code> for it".to_string(),
+        SkipKind::Scraper => "another scraper wrote it; <code>ok</code> reads mwoffliner's ZIMs".to_string(),
+        SkipKind::Duplicate { label, winner } => {
+            format!("its label <code>{}</code> is already {}'s", esc(label), esc(winner))
+        }
+        SkipKind::Unusable => "not usable; run <code>ok collections</code> for the reason".to_string(),
+    };
+    format!(
+        r#"<li><span class="file">{file}</span> <span class="reason">{reason}</span></li>"#,
+        file = esc(&skipped.path.file_name().unwrap_or(skipped.path.as_os_str()).to_string_lossy()),
+    )
 }
 
 /// `50001` -> `"50,001"`. `library.article_count()` is in the tens of

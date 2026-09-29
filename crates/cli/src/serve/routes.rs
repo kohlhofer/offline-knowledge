@@ -157,11 +157,20 @@ fn unavailable_html(active: &Active) -> Response {
     (StatusCode::SERVICE_UNAVAILABLE, [(header::CACHE_CONTROL, "no-store")], Html(body)).into_response()
 }
 
-/// A first path segment that is no collection's label. The default
+/// A first path segment that is no collection's label. With exactly one
+/// collection loaded there is only one thing such a URL can mean — trimmed
+/// to its article, or written before collections existed — so `/{rest}`
+/// redirects to `/{label}/{rest}` rather than dead-ending. With more than
+/// one it names what is loaded, as the CLI and MCP both do; the default
 /// collection's chrome comes with it, so the reader has a way out.
-fn unknown_collection_html(state: &AppState, label: &str) -> Response {
+fn unknown_collection_html(state: &AppState, rest: &str, label: &str) -> Response {
+    if let [only] = &state.labels[..] {
+        let location = ok_core::html::article_href(&format!("/{only}"), rest, None);
+        return (StatusCode::FOUND, [(header::LOCATION, location), (header::CACHE_CONTROL, "no-store".to_string())]).into_response();
+    }
     let active = active(state, None);
-    let message = format!("There is no collection labeled \"{label}\" here.");
+    let loaded = state.labels.iter().map(|l| l.as_str()).collect::<Vec<_>>().join(", ");
+    let message = format!("There is no collection labeled \"{label}\" here. Loaded: {loaded}.");
     let body = page::shell("Not found", Some(&active), None, &page::error_body("404 Not Found", &message));
     (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-cache")], Html(body))
         .into_response()
@@ -195,7 +204,7 @@ pub async fn collection_home(
     if query_too_long(&label) {
         return bad_request_html(&format!("a path accepts at most {MAX_QUERY_CHARS} characters"));
     }
-    let Some(index) = index_of(&state, &label) else { return unknown_collection_html(&state, &label) };
+    let Some(index) = index_of(&state, &label) else { return unknown_collection_html(&state, &label, &label) };
     let active = at(&state, index);
     let body = page::shell(active.brand(), Some(&active), params.q.as_deref(), &page::home_body(active.collection()));
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-store")], Html(body)).into_response()
@@ -349,9 +358,12 @@ pub async fn article(
     if query_too_long(&path) || query_too_long(&label) {
         return bad_request_html(&format!("a path accepts at most {MAX_QUERY_CHARS} characters"));
     }
-    let Some(index) = index_of(&state, &label) else { return unknown_collection_html(&state, &label) };
+    let Some(index) = index_of(&state, &label) else {
+        return unknown_collection_html(&state, &format!("{label}/{path}"), &label);
+    };
     let active = at(&state, index);
     let Some(library) = library_of(&active) else { return unavailable_html(&active) };
+
     // Cosmetic only (the banner below): an oversized value is ignored
     // rather than failing the whole page load over it.
     let redirected_from = params.redirected_from.filter(|s| !query_too_long(s));

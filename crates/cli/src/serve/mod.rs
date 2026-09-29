@@ -24,7 +24,9 @@ use axum::routing::get;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
 use hyper_util::service::TowerToHyperService;
+use ok_core::text::sanitize_line;
 use ok_core::{Collections, Label};
+
 use routes::ArticleCache;
 use tower::limit::ConcurrencyLimitLayer;
 
@@ -53,6 +55,15 @@ pub fn run(collections: Arc<Collections>, bind: SocketAddr) -> Result<()> {
 }
 
 async fn serve(collections: Arc<Collections>, bind: SocketAddr) -> Result<()> {
+    // What is being served, before where: in the container one new ZIM can
+    // change which collection the home page and the brand belong to, and a
+    // line saying only "listening" leaves that invisible. Article counts
+    // come from each index's `meta.json`, so this opens nothing.
+    for (i, collection) in collections.iter().enumerate() {
+        let Ok(label) = collection.label() else { continue };
+        let default = if i == collections.default_index() { " (default)" } else { "" };
+        eprintln!("{label}{default}  {}  {} articles", sanitize_line(collection.title()), collection.article_count());
+    }
     let listener = tokio::net::TcpListener::bind(bind).await?;
     eprintln!("listening on http://{bind}");
     accept_loop(listener, collections, HEADER_READ_TIMEOUT).await

@@ -109,26 +109,73 @@ fn an_unusable_file_is_skipped_with_a_reason_and_the_rest_load() {
     // older build is the only thing that can leave this behind.
     rewrite_meta(&scraped, |m| m.scraper = Some("sotoki 1.3".into()));
 
-    let set = Collections::open(&[raw.clone(), good, scraped.clone()], None).unwrap();
+    // A fourth, on the path every index in the wild is on: no `name` and no
+    // `scraper` in `meta.json`, so the refusal comes from the ZIM when a
+    // label is resolved, not from the index at load.
+    let legacy = imported(dir.path(), "legacy.zim", "wikivoyage_en_all", "Wikivoyage", &["Ulm"]);
+    rewrite_meta(&legacy, |m| {
+        m.name = None;
+        m.scraper = None;
+    });
+    build(dir.path(), "legacy.zim", "wikivoyage_en_all", "Wikivoyage", Some("sotoki 1.3"), &["Ulm"]);
+
+    let set = Collections::open(&[raw.clone(), good, scraped.clone(), legacy.clone()], None).unwrap();
     assert_eq!(set.len(), 1);
     assert_eq!(set.default().label().unwrap().as_str(), "wikipedia");
 
-    assert_eq!(set.skipped().len(), 2, "{:?}", set.skipped().iter().map(|s| &s.reason).collect::<Vec<_>>());
-    let reason = |path: &Path| set.skipped().iter().find(|s| s.path == path).unwrap().reason.clone();
-    let raw_reason = reason(&raw);
+    assert_eq!(set.skipped().len(), 3, "{:?}", set.skipped().iter().map(|s| &s.reason).collect::<Vec<_>>());
+    let skipped = |path: &Path| set.skipped().iter().find(|s| s.path == path).unwrap();
+    let raw_reason = skipped(&raw).reason.clone();
     assert!(raw_reason.contains("ok --zim") && raw_reason.contains("import"), "the reason names the command that fixes it: {raw_reason}");
-    let scraped_reason = reason(&scraped);
+    let scraped_reason = skipped(&scraped).reason.clone();
     assert!(scraped_reason.contains("sotoki 1.3"), "{scraped_reason}");
+    // The class travels with the reason, whichever of the two paths found it:
+    // a browser page shows the class, because the reason names a path.
+    assert_eq!(skipped(&raw).kind, ok_core::SkipKind::NotImported);
+    assert_eq!(skipped(&scraped).kind, ok_core::SkipKind::Scraper);
+    assert_eq!(skipped(&legacy).kind, ok_core::SkipKind::Scraper, "{}", skipped(&legacy).reason);
 }
 
-/// Skipping is per file, but an empty set is not a working process.
+
+/// Skipping is per file, but an empty set is not a working process — and the
+/// error is the last place those reasons can still be said. `ok --zim
+/// fake.zim suggest x` is the commonest first-run mistake there is, so it
+/// names the file and a command that works, not just that nothing loaded.
 #[test]
-fn nothing_loadable_is_an_error_not_an_empty_set() {
+fn nothing_loadable_is_an_error_that_still_names_the_file_and_the_fix() {
     let dir = tempfile::tempdir().unwrap();
     let raw = build(dir.path(), "raw.zim", "wikipedia_en_top", "Best of Wikipedia", Some("mwoffliner 1.17.5"), &["Albert Einstein"]);
-    let err = Collections::open(&[raw], None).err().unwrap();
-    assert!(matches!(err, ok_core::Error::NoCollections), "{err}");
+    let err = Collections::open(std::slice::from_ref(&raw), None).err().unwrap();
+    assert!(matches!(err, ok_core::Error::NoCollections { .. }), "{err}");
+    let message = err.to_string();
+    assert!(message.contains("raw.zim"), "the file that went nowhere is named: {message}");
+    assert!(message.contains("ok --zim") && message.contains("import"), "and the command that fixes it: {message}");
+
+    // The same for a `--collection` nobody can satisfy: the label it could
+    // not find, what is loaded, and what was skipped on the way.
+    let good = imported(dir.path(), "good.zim", "wiktionary_en-simple_all", "Wiktionary", &["Mercury"]);
+    let err = Collections::open(&[raw, good], Some("wikipedia")).err().unwrap().to_string();
+    assert!(err.contains("wikipedia") && err.contains("wiktionary"), "{err}");
+    assert!(err.contains("raw.zim"), "a skipped file is named here too: {err}");
 }
+
+/// Every line that reports a skip names the file itself, so the reason does
+/// not open with the same path again: `NotImported`'s message otherwise
+/// repeats a 110-character absolute path three times over in one line.
+#[test]
+fn a_skip_reason_does_not_repeat_the_path_the_line_already_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let raw = build(dir.path(), "raw.zim", "wikipedia_en_top", "Best of Wikipedia", Some("mwoffliner 1.17.5"), &["Albert Einstein"]);
+    let good = imported(dir.path(), "good.zim", "wiktionary_en-simple_all", "Wiktionary", &["Mercury"]);
+    let set = Collections::open(&[raw.clone(), good], None).unwrap();
+
+    let skipped = &set.skipped()[0];
+    let shown = raw.display().to_string();
+    assert!(!skipped.reason.starts_with(&shown), "the reason does not open with the path: {}", skipped.reason);
+    assert!(skipped.reason.contains("ok --zim"), "the command that fixes it still carries it: {}", skipped.reason);
+    assert_eq!(skipped.kind, ok_core::SkipKind::NotImported);
+}
+
 
 /// A label is the token in a URL path, an MCP identifier and a terminal
 /// line, so the only constructor validates syntax and length. The offending
@@ -167,7 +214,14 @@ fn a_label_collision_skips_the_second_file_and_names_both() {
     let reason = &set.skipped()[0].reason;
     assert!(reason.contains("en.zim"), "the reason names the file that took the label: {reason}");
     assert!(reason.contains("wikipedia"), "{reason}");
+    // A browser page cannot show the reason (it carries a path), so the
+    // class carries the label and the winner's filename on their own.
+    assert_eq!(
+        set.skipped()[0].kind,
+        ok_core::SkipKind::Duplicate { label: "wikipedia".to_string(), winner: "en.zim".to_string() }
+    );
 }
+
 
 /// An index written before `IndexMeta` carried `name` and `scraper` reads
 /// them from the ZIM instead, once, when something asks for a label.

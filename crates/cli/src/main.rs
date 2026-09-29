@@ -3,7 +3,9 @@ mod mcp;
 mod serve;
 mod tui;
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
+
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -89,7 +91,10 @@ fn main() -> Result<()> {
     match cli.command.unwrap_or(Command::Tui) {
         Command::Import { heap_mb, force } => run_imports(&paths, heap_mb, force, &mut std::io::stdout().lock()),
         Command::Collections => {
-            print!("{}", collections_report(&loaded(&paths, wanted)?)?);
+            // Not through `loaded`: the report below owns the skipped lines
+            // for this one command, so they are not printed to stderr first
+            // and then again to stdout around the loaded list.
+            print!("{}", collections_report(&Collections::open(&paths, wanted)?)?);
             Ok(())
         }
         Command::Tui => tui::run(set(&paths, wanted)?),
@@ -167,14 +172,19 @@ fn main() -> Result<()> {
 /// that is not a `.zim` file are passed over without a word; a file that
 /// was named but cannot be loaded belongs to [`Collections::open`], which
 /// says so.
+///
+/// One file is one collection however it was named: the appliance ships
+/// `OK_ZIM=/data`, so `--zim /data/x.zim` on top of it otherwise gives that
+/// file two entries and `Collections::open` reports its label as taken by
+/// itself.
 fn zim_paths(given: &[PathBuf]) -> Result<Vec<PathBuf>> {
     if given.is_empty() {
         bail!("no ZIM file given: pass --zim <file> or set OK_ZIM");
     }
-    let mut paths = Vec::new();
+    let mut candidates = Vec::new();
     for path in given {
         if !path.is_dir() {
-            paths.push(path.clone());
+            candidates.push(path.clone());
             continue;
         }
         let entries = std::fs::read_dir(path).with_context(|| format!("reading {}", path.display()))?;
@@ -186,7 +196,16 @@ fn zim_paths(given: &[PathBuf]) -> Result<Vec<PathBuf>> {
             })
             .collect();
         found.sort();
-        paths.extend(found);
+        candidates.extend(found);
+    }
+    let mut seen = HashSet::new();
+    let mut paths = Vec::new();
+    for path in candidates {
+        // The canonical path is the identity; the path as given is what the
+        // reasons and the `ok --zim <path> import` they name have to carry.
+        if seen.insert(path.canonicalize().unwrap_or_else(|_| path.clone())) {
+            paths.push(path);
+        }
     }
     Ok(paths)
 }
@@ -354,6 +373,27 @@ mod tests {
 
         assert!(zim_paths(&[]).is_err(), "no --zim at all is an error, not an empty set");
     }
+
+    /// One file is one collection however it was named. The appliance ships
+    /// `OK_ZIM=/data`, so naming a file on top of the directory holding it
+    /// is a first-run case, and twice over it collides a label with itself.
+    #[test]
+    fn zim_paths_takes_one_file_once_however_many_ways_it_was_named() {
+        let dir = tempfile::tempdir().unwrap();
+        zim(dir.path(), "a.zim", "wikipedia_en_top", "mwoffliner 1.17.5", &["Albert Einstein"]);
+        zim(dir.path(), "b.zim", "wiktionary_en_all", "mwoffliner 1.17.5", &["Mercury"]);
+
+        let expanded = zim_paths(&[dir.path().to_path_buf(), dir.path().join("a.zim")]).unwrap();
+        let names: Vec<&str> = expanded.iter().map(|p| p.file_name().unwrap().to_str().unwrap()).collect();
+        assert_eq!(names, ["a.zim", "b.zim"], "the directory already stood for a.zim: {expanded:?}");
+
+        let twice = zim_paths(&[dir.path().join("a.zim"), dir.path().join("a.zim")]).unwrap();
+        assert_eq!(twice.len(), 1, "the same path twice is one collection: {twice:?}");
+
+        let both = zim_paths(&[dir.path().to_path_buf(), dir.path().to_path_buf()]).unwrap();
+        assert_eq!(both.len(), 2, "and so is the same directory twice: {both:?}");
+    }
+
 
     /// `ok --zim <dir> import` covers every file, reports the one it
     /// refuses while still importing the rest, and exits non-zero. A second

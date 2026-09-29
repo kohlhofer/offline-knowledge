@@ -26,10 +26,15 @@ pub enum Error {
     Label(String),
     #[error("{zim} was not written by mwoffliner ({scraper}); ok reads mwoffliner's HTML only", zim = .zim.display())]
     UnsupportedScraper { zim: PathBuf, scraper: String },
-    #[error("no collection could be loaded")]
-    NoCollections,
-    #[error("no collection is labeled \"{label}\"; loaded: {loaded}")]
-    UnknownCollection { label: String, loaded: String },
+    /// `skipped` is every path [`crate::Collections::open`] could not load,
+    /// already formatted: it is the only place those reasons can still be
+    /// said, and "no collection could be loaded" on its own names neither
+    /// the file nor the command that fixes it.
+    #[error("no collection could be loaded{skipped}")]
+    NoCollections { skipped: String },
+    #[error("no collection is labeled \"{label}\"; loaded: {loaded}{skipped}")]
+    UnknownCollection { label: String, loaded: String, skipped: String },
+
     /// A collection whose label or library failed to resolve. The reason is
     /// the original error's message: it is cached and handed out again on
     /// every later use, and an [`Error`] is not `Clone`.
