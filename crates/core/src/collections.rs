@@ -387,13 +387,7 @@ impl Collections {
         collections = keep_usable_labels(collections, &mut skipped, &reserved, false);
         non_empty(&collections, &skipped)?;
         let default_index = match default_label {
-            // Finding a named label forces every label anyway, so the
-            // uniqueness check is free here and the set arrives resolved.
-            Some(wanted) => {
-                collections = keep_usable_labels(collections, &mut skipped, &reserved, true);
-                non_empty(&collections, &skipped)?;
-                index_of_label(&collections, wanted, &skipped)?
-            }
+            Some(wanted) => index_of_label(&collections, wanted, &reserved, &skipped)?,
             None => 0,
         };
         Ok(Collections { collections, skipped, default_index, reserved })
@@ -407,13 +401,17 @@ impl Collections {
     /// Free the second time: labels are cached, and a set that has been
     /// through this has nothing left to drop.
     pub fn resolve_labels(mut self) -> Result<Collections> {
+        // The default is held by its path across the pass: [`Self::open`]
+        // stops at the label it was told to find, so its index is one into a
+        // set nothing has dropped from yet.
+        let default_path = self.collections[self.default_index].zim_path.clone();
         self.collections = keep_usable_labels(std::mem::take(&mut self.collections), &mut self.skipped, &self.reserved, true);
 
         non_empty(&self.collections, &self.skipped)?;
-        // `default_index` is either 0, or an index into a set this already
-        // ran over. Dropping the first collection therefore moves the
-        // default to the next one in load order, which is what `default`
-        // promises when nothing named one.
+        // A default that named nothing was the first collection loaded, so
+        // dropping that one moves the default to the next in load order,
+        // which is what `default` promises when nothing named one.
+        self.default_index = self.collections.iter().position(|c| c.zim_path == default_path).unwrap_or(0);
         Ok(self)
     }
 
@@ -566,15 +564,29 @@ fn keep_usable_labels(loaded: Vec<Collection>, skipped: &mut Vec<Skipped>, reser
     kept
 }
 
-/// Resolving a wanted label forces every label, which is the point: a
-/// single collection's is otherwise never read.
-fn index_of_label(collections: &[Collection], wanted: &str, skipped: &[Skipped]) -> Result<usize> {
+/// The wanted label, by resolving labels in load order and stopping at the
+/// match. The appliance ships `OK_COLLECTION=wikipedia`, so forcing every
+/// label to honour it is the cost [`Collections::resolve_labels`] was split
+/// out to defer, on exactly the deployment that named it. The uniqueness
+/// pass waits with it: the first file to carry a label is the one that keeps
+/// it, so the first match is the same collection that pass would have left
+/// standing. Only a miss reads them all, and only to say what is loaded.
+fn index_of_label(collections: &[Collection], wanted: &str, reserved: &[Box<str>], skipped: &[Skipped]) -> Result<usize> {
+    let mut loaded: Vec<&str> = Vec::new();
     for (i, collection) in collections.iter().enumerate() {
-        if collection.label()?.as_str() == wanted {
+        let Ok(label) = collection.resolved_label() else { continue };
+        // Skipped here as well, or `--collection` could name a collection
+        // `resolve_labels` is about to drop out from under the index.
+        if is_reserved(reserved, label) {
+            continue;
+        }
+        if label.as_str() == wanted {
             return Ok(i);
         }
+        if !loaded.contains(&label.as_str()) {
+            loaded.push(label.as_str());
+        }
     }
-    let loaded = collections.iter().filter_map(|c| c.label().ok()).map(Label::to_string).collect::<Vec<_>>().join(", ");
-    Err(Error::UnknownCollection { label: echo(wanted), loaded, skipped: skipped_note(skipped) })
+    Err(Error::UnknownCollection { label: echo(wanted), loaded: loaded.join(", "), skipped: skipped_note(skipped) })
 }
 

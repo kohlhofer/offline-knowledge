@@ -258,12 +258,19 @@ fn open_resolves_no_label_and_resolve_labels_is_where_an_unusable_one_is_dropped
     assert_eq!(set.skipped()[0].path, gone);
     assert_eq!(set.default().label().unwrap().as_str(), "wikipedia");
 
-    // Naming a default has to find it, so that path resolves every label
-    // itself — and the set it hands back needs no second pass.
-    let set = Collections::open(&[a, gone.clone()], Some("wikipedia"), &[]).unwrap();
-    assert_eq!(set.len(), 1);
+    // Naming a default resolves labels in load order and stops at the match,
+    // so a file behind it is still not read: `OK_COLLECTION=wikipedia` is
+    // what the appliance ships on a mount it does not control, and forcing
+    // every label to honour it is the same cost from the other side.
+    let set = Collections::open(&[a.clone(), gone.clone()], Some("wikipedia"), &[]).unwrap();
+    assert_eq!(set.len(), 2, "the one behind the match was never read");
+    assert!(set.skipped().is_empty(), "and the uniqueness pass waits with it");
+    assert_eq!(set.default().zim_path(), a);
+
+    let set = set.resolve_labels().unwrap();
+    assert_eq!(set.len(), 1, "the pass that does read them drops it");
     assert_eq!(set.skipped()[0].path, gone);
-    assert_eq!(set.resolve_labels().unwrap().len(), 1, "idempotent");
+    assert_eq!(set.default().zim_path(), a, "and the default survives being renumbered");
 }
 
 /// `default()` has to name the same collection whichever frontend asks.
