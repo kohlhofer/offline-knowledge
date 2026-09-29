@@ -153,7 +153,13 @@ fn library_of(active: &Active) -> Option<Arc<Library>> {
 /// [`server_error_html`] follows.
 fn unavailable_html(active: &Active) -> Response {
     let message = format!("The \"{}\" collection could not be opened. Re-run `ok import` for it.", active.label());
-    let body = page::shell("Unavailable", Some(active), None, &page::error_body("503 Service Unavailable", &message));
+    let body = page::shell_with(
+        "Unavailable",
+        Some(active),
+        None,
+        &page::error_body("503 Service Unavailable", &message),
+        page::Chrome::Unavailable,
+    );
     (StatusCode::SERVICE_UNAVAILABLE, [(header::CACHE_CONTROL, "no-store")], Html(body)).into_response()
 }
 
@@ -206,7 +212,15 @@ pub async fn collection_home(
     }
     let Some(index) = index_of(&state, &label) else { return unknown_collection_html(&state, &label, &label) };
     let active = at(&state, index);
+    // `failure()` is a `OnceLock::get`, so this page still opens no library:
+    // it says nothing about a collection nothing has tried yet, and refuses
+    // to serve a front page with a healthy article count for one already
+    // known to be broken, every link out of which is a 503.
+    if active.collection().failure().is_some() {
+        return unavailable_html(&active);
+    }
     let body = page::shell(active.brand(), Some(&active), params.q.as_deref(), &page::home_body(active.collection()));
+
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-store")], Html(body)).into_response()
 }
 

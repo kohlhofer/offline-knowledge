@@ -87,7 +87,11 @@ fn switcher(active: &Active) -> String {
         .map(|(i, label)| {
             let failed = active.collections.at(i).is_some_and(|c| c.failure().is_some());
             match (i == active.index, failed) {
-                (true, _) => format!(r#"<a class="collection" href="/{label}" aria-current="page">{label}</a>"#),
+                (true, false) => format!(r#"<a class="collection" href="/{label}" aria-current="page">{label}</a>"#),
+                // Current and failed: `/` marks it failed, and a switcher
+                // showing the one you are in as healthy while every link out
+                // of it is a 503 disagrees with the page around it.
+                (true, true) => format!(r#"<span class="collection failed" aria-current="page">{label} · failed</span>"#),
                 // Not a link: its library could not be opened, so every
                 // page under it would be a 503.
                 (false, true) => format!(r#"<span class="collection failed">{label} · failed</span>"#),
@@ -105,9 +109,30 @@ fn switcher(active: &Active) -> String {
 /// box. `active` is `None` only on an error page, which belongs to no
 /// collection.
 pub fn shell(page_title: &str, active: Option<&Active>, q: Option<&str>, body: &str) -> String {
+    shell_with(page_title, active, q, body, Chrome::Inside)
+}
+
+/// Which collection the chrome around a body belongs to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Chrome {
+    /// A page inside one collection: its brand, its home link, and its
+    /// hidden `c` on the header form.
+    Inside,
+    /// A page whose own collection could not be opened. The switcher still
+    /// shows (it is the way out, and marks that collection failed) while the
+    /// home link and the search form point at `/` instead: every URL under
+    /// this collection is another 503.
+    Unavailable,
+}
+
+/// [`shell`] with the chrome named. Kept separate so the ten pages that
+/// belong to their collection say nothing about it.
+pub fn shell_with(page_title: &str, active: Option<&Active>, q: Option<&str>, body: &str, chrome: Chrome) -> String {
+    let scoped = active.filter(|_| chrome == Chrome::Inside);
     let brand = active.map_or("Error", |a| a.brand());
-    let home = active.map_or_else(|| "/".to_string(), |a| a.base());
-    let label = active.map_or("", |a| a.label());
+    let home = scoped.map_or_else(|| "/".to_string(), |a| a.base());
+    let label = scoped.map_or("", |a| a.label());
+
     // One attribute is where app.js reads the active collection, so the
     // three requests it makes carry it too.
     let collection_attr = if label.is_empty() { String::new() } else { format!(r#" data-collection="{label}""#) };
@@ -181,15 +206,19 @@ pub fn collections_body(active: &Active) -> String {
         .enumerate()
         .filter_map(|(i, label)| {
             let collection = active.collections.at(i)?;
-            let state = match collection.failure() {
-                Some(_) => "failed".to_string(),
-                None => format!("{} articles", with_thousands(collection.article_count())),
+            // A failed collection is named, not linked: every page under it
+            // is a 503, this one included.
+            let (name, state) = match collection.failure() {
+                Some(_) => (format!(r#"<span class="failed">{label}</span>"#), "failed".to_string()),
+
+                None => (format!(r#"<a href="/{label}">{label}</a>"#), format!("{} articles", with_thousands(collection.article_count()))),
             };
             Some(format!(
-                r#"<li><a href="/{label}">{label}</a> <span class="brand">{brand}</span> <span class="count">{state}</span></li>"#,
+                r#"<li>{name} <span class="brand">{brand}</span> <span class="count">{state}</span></li>"#,
                 brand = esc(collection.title()),
             ))
         })
+
         .collect();
     let skipped: String = active.collections.skipped().iter().map(skipped_row).collect();
     let not_loaded = if skipped.is_empty() {

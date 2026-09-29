@@ -237,6 +237,13 @@ main {
   color: var(--dim);
 }
 
+/* Named, not linked: every page under a failed collection is a 503. */
+
+.collection-list .failed {
+  color: var(--missing);
+}
+
+
 .collection-list .count,
 .skipped .reason {
   font-size: 0.85rem;

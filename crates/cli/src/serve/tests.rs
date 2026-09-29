@@ -902,6 +902,39 @@ async fn a_failed_collection_answers_503_naming_only_its_label() {
     assert_eq!(get(&app, "/search?q=physics&c=wiktionary").await.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
+/// A collection's own front page read its article count from `meta.json` and
+/// never asked whether the collection worked, so it served 200 with a
+/// healthy count while `/` marked it failed and every link out of it was a
+/// 503. The guard is `failure()`, a `OnceLock::get`: free, and silent about a
+/// collection nothing has opened yet, which is why this asks the article
+/// route first.
+#[tokio::test]
+async fn a_failed_collections_own_home_page_is_the_503_too() {
+    let (_d, collections) = two_with_a_failed_collection();
+    let app = router(collections).unwrap();
+
+    // Nothing has opened it yet, so nothing is known to be broken.
+    let body = body_text(get(&app, "/wiktionary").await).await;
+    assert!(body.contains("2 articles in <strong>Tiny dictionary</strong>"), "{body}");
+
+    assert_eq!(get(&app, "/wiktionary/Mercury").await.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let res = get(&app, "/wiktionary").await;
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE, "once it is known to have failed, its home page says so");
+    let body = body_text(res).await;
+    assert!(!body.contains("2 articles in"), "and not a healthy article count: {body}");
+    // The way out is `/`, not another URL under the collection that failed.
+    assert!(body.contains(r#"<a class="home-link" href="/">"#), "the home link leaves the collection: {body}");
+    assert!(!body.contains(r#"name="c""#), "and the search form does not carry it back in: {body}");
+    assert!(body.contains(r#"<span class="collection failed" aria-current="page">wiktionary · failed</span>"#), "{body}");
+
+    // `/` names it rather than linking it, for the same reason.
+    let body = body_text(get(&app, "/").await).await;
+    assert!(body.contains(r#"<span class="failed">wiktionary</span>"#), "{body}");
+    assert!(!body.contains(r#"<a href="/wiktionary">"#), "a failed collection is not linked from the list either: {body}");
+}
+
+
 /// The one cross-collection read anything does: an unscored, exact-title
 /// probe on a miss. The title index stores normalized keys, so the hint
 /// echoes the reader's own path rather than a display title, and the link
