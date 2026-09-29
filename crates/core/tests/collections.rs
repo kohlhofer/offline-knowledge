@@ -49,7 +49,7 @@ fn labels_come_from_name_and_the_first_loaded_is_the_default() {
     let dir = tempfile::tempdir().unwrap();
     let a = imported(dir.path(), "a.zim", "wikipedia_en_top", "Best of Wikipedia", &["Albert Einstein"]);
     let b = imported(dir.path(), "b.zim", "wiktionary_en-simple_all", "Wiktionary in Simple English", &["Mercury"]);
-    let set = Collections::open(&[a, b], None).unwrap();
+    let set = Collections::open(&[a, b], None, &[]).unwrap();
 
     let labels: Vec<String> = set.iter().map(|c| c.label().unwrap().to_string()).collect();
     assert_eq!(labels, ["wikipedia", "wiktionary"], "the text before the first underscore, lowercased");
@@ -70,11 +70,11 @@ fn a_named_default_is_resolved_and_an_unknown_one_lists_the_loaded_labels() {
     let a = imported(dir.path(), "a.zim", "wikipedia_en_top", "Best of Wikipedia", &["Albert Einstein"]);
     let b = imported(dir.path(), "b.zim", "wiktionary_en-simple_all", "Wiktionary in Simple English", &["Mercury"]);
 
-    let set = Collections::open(&[a.clone(), b.clone()], Some("wiktionary")).unwrap();
+    let set = Collections::open(&[a.clone(), b.clone()], Some("wiktionary"), &[]).unwrap();
     assert_eq!(set.default().label().unwrap().as_str(), "wiktionary");
     assert_eq!(set.default_index(), 1);
 
-    let err = Collections::open(&[a, b], Some("archlinux")).err().unwrap().to_string();
+    let err = Collections::open(&[a, b], Some("archlinux"), &[]).err().unwrap().to_string();
     assert!(err.contains("archlinux") && err.contains("wikipedia") && err.contains("wiktionary"), "{err}");
 }
 
@@ -86,7 +86,7 @@ fn open_opens_no_library_and_one_open_leaves_the_others_closed() {
     let dir = tempfile::tempdir().unwrap();
     let a = imported(dir.path(), "a.zim", "wikipedia_en_top", "Best of Wikipedia", &["Albert Einstein"]);
     let b = imported(dir.path(), "b.zim", "wiktionary_en-simple_all", "Wiktionary in Simple English", &["Mercury"]);
-    let set = Collections::open(&[a, b], None).unwrap();
+    let set = Collections::open(&[a, b], None, &[]).unwrap();
 
     assert!(set.iter().all(|c| !c.is_open()), "startup must open no library");
     let library = set.get("wikipedia").unwrap().library().unwrap();
@@ -122,7 +122,7 @@ fn an_unusable_file_is_skipped_with_a_reason_and_the_rest_load() {
     // `resolve_labels`, because two of the four are only found out when a
     // label is resolved: the legacy one's scraper and, in the test below, a
     // label already taken.
-    let set = Collections::open(&[raw.clone(), good, scraped.clone(), legacy.clone()], None).unwrap().resolve_labels().unwrap();
+    let set = Collections::open(&[raw.clone(), good, scraped.clone(), legacy.clone()], None, &[]).unwrap().resolve_labels().unwrap();
     assert_eq!(set.len(), 1);
     assert_eq!(set.default().label().unwrap().as_str(), "wikipedia");
 
@@ -148,7 +148,7 @@ fn an_unusable_file_is_skipped_with_a_reason_and_the_rest_load() {
 fn nothing_loadable_is_an_error_that_still_names_the_file_and_the_fix() {
     let dir = tempfile::tempdir().unwrap();
     let raw = build(dir.path(), "raw.zim", "wikipedia_en_top", "Best of Wikipedia", Some("mwoffliner 1.17.5"), &["Albert Einstein"]);
-    let err = Collections::open(std::slice::from_ref(&raw), None).err().unwrap();
+    let err = Collections::open(std::slice::from_ref(&raw), None, &[]).err().unwrap();
     assert!(matches!(err, ok_core::Error::NoCollections { .. }), "{err}");
     let message = err.to_string();
     assert!(message.contains("raw.zim"), "the file that went nowhere is named: {message}");
@@ -157,7 +157,7 @@ fn nothing_loadable_is_an_error_that_still_names_the_file_and_the_fix() {
     // The same for a `--collection` nobody can satisfy: the label it could
     // not find, what is loaded, and what was skipped on the way.
     let good = imported(dir.path(), "good.zim", "wiktionary_en-simple_all", "Wiktionary", &["Mercury"]);
-    let err = Collections::open(&[raw, good], Some("wikipedia")).err().unwrap().to_string();
+    let err = Collections::open(&[raw, good], Some("wikipedia"), &[]).err().unwrap().to_string();
     assert!(err.contains("wikipedia") && err.contains("wiktionary"), "{err}");
     assert!(err.contains("raw.zim"), "a skipped file is named here too: {err}");
 }
@@ -170,7 +170,7 @@ fn a_skip_reason_does_not_repeat_the_path_the_line_already_names() {
     let dir = tempfile::tempdir().unwrap();
     let raw = build(dir.path(), "raw.zim", "wikipedia_en_top", "Best of Wikipedia", Some("mwoffliner 1.17.5"), &["Albert Einstein"]);
     let good = imported(dir.path(), "good.zim", "wiktionary_en-simple_all", "Wiktionary", &["Mercury"]);
-    let set = Collections::open(&[raw.clone(), good], None).unwrap();
+    let set = Collections::open(&[raw.clone(), good], None, &[]).unwrap();
 
     let skipped = &set.skipped()[0];
     let shown = raw.display().to_string();
@@ -209,7 +209,7 @@ fn a_label_collision_skips_the_second_file_and_names_both() {
     let dir = tempfile::tempdir().unwrap();
     let en = imported(dir.path(), "en.zim", "wikipedia_en_top", "Best of Wikipedia", &["Albert Einstein"]);
     let de = imported(dir.path(), "de.zim", "wikipedia_de_all", "Wikipedia", &["Ulm"]);
-    let set = Collections::open(&[en, de.clone()], None).unwrap().resolve_labels().unwrap();
+    let set = Collections::open(&[en, de.clone()], None, &[]).unwrap().resolve_labels().unwrap();
 
     assert_eq!(set.len(), 1);
     assert_eq!(set.skipped().len(), 1);
@@ -248,19 +248,19 @@ fn open_resolves_no_label_and_resolve_labels_is_where_an_unusable_one_is_dropped
     });
     std::fs::remove_file(&gone).unwrap();
 
-    let set = Collections::open(&[a.clone(), gone.clone()], None).unwrap();
+    let set = Collections::open(&[a.clone(), gone.clone()], None, &[]).unwrap();
     assert_eq!(set.len(), 2, "both loaded: `open` reads meta.json and never the ZIM");
     assert!(set.skipped().is_empty());
     assert_eq!(set.default().zim_path(), a, "and the default is the first path given");
 
-    let set = Collections::open(&[a.clone(), gone.clone()], None).unwrap().resolve_labels().unwrap();
+    let set = Collections::open(&[a.clone(), gone.clone()], None, &[]).unwrap().resolve_labels().unwrap();
     assert_eq!(set.len(), 1, "a label is wanted now, so the one that cannot give one is dropped");
     assert_eq!(set.skipped()[0].path, gone);
     assert_eq!(set.default().label().unwrap().as_str(), "wikipedia");
 
     // Naming a default has to find it, so that path resolves every label
     // itself — and the set it hands back needs no second pass.
-    let set = Collections::open(&[a, gone.clone()], Some("wikipedia")).unwrap();
+    let set = Collections::open(&[a, gone.clone()], Some("wikipedia"), &[]).unwrap();
     assert_eq!(set.len(), 1);
     assert_eq!(set.skipped()[0].path, gone);
     assert_eq!(set.resolve_labels().unwrap().len(), 1, "idempotent");
@@ -279,7 +279,7 @@ fn an_index_without_name_or_scraper_still_loads_and_labels_itself() {
         m.scraper = None;
     });
 
-    let set = Collections::open(&[a], None).unwrap();
+    let set = Collections::open(&[a], None, &[]).unwrap();
     assert_eq!(set.default().label().unwrap().as_str(), "wikipedia");
     assert!(!set.default().is_open(), "reading a label must not cost a Library");
 }
@@ -296,7 +296,7 @@ fn a_collection_whose_zim_no_longer_matches_fails_at_first_use_and_stays_failed(
     build(dir.path(), "a.zim", "wikipedia_en_top", "Best of Wikipedia", Some("mwoffliner 1.17.5"), &["Marie Curie", "Ulm", "Bern"]);
     assert_ne!(std::fs::read(&a).unwrap().len(), original.len(), "the fixture must actually differ from the imported file");
 
-    let set = Collections::open(std::slice::from_ref(&a), None).unwrap();
+    let set = Collections::open(std::slice::from_ref(&a), None, &[]).unwrap();
     assert_eq!(set.default().failure(), None, "nothing is known to be broken before the first use");
 
     let first = set.default().library().err().unwrap().to_string();
@@ -315,7 +315,7 @@ fn exact_elsewhere_names_the_other_collections_without_opening_a_library() {
     let dir = tempfile::tempdir().unwrap();
     let a = imported(dir.path(), "a.zim", "wikipedia_en_top", "Best of Wikipedia", &["Albert Einstein"]);
     let b = imported(dir.path(), "b.zim", "wiktionary_en-simple_all", "Wiktionary in Simple English", &["Mercury"]);
-    let set = Collections::open(&[a, b], None).unwrap();
+    let set = Collections::open(&[a, b], None, &[]).unwrap();
 
     let hits: Vec<&str> = set.exact_elsewhere(0, "Mercury").iter().map(|c| c.label().unwrap().as_str()).collect();
     assert_eq!(hits, ["wiktionary"]);

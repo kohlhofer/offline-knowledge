@@ -306,6 +306,12 @@ pub struct Collections {
     collections: Vec<Collection>,
     skipped: Vec<Skipped>,
     default_index: usize,
+    /// First path segments a frontend's own routes own, which no label may
+    /// take. Which ones those are, and how often they change, belongs to
+    /// that router, so they are passed in; holding them here makes
+    /// [`Self::open`]'s filter and [`Self::resolve_labels`]' the same one,
+    /// which is what keeps `default_index` valid across both.
+    reserved: Vec<Box<str>>,
 }
 
 impl Collections {
@@ -323,7 +329,8 @@ impl Collections {
     /// metadata-cluster decompression, 1.1 to 1.7 ms per file, and
     /// `ok suggest` shows no label at all. [`Self::resolve_labels`] is where
     /// a frontend that does shows asks for them.
-    pub fn open(paths: &[PathBuf], default_label: Option<&str>) -> Result<Collections> {
+    pub fn open(paths: &[PathBuf], default_label: Option<&str>, reserved: &[&str]) -> Result<Collections> {
+        let reserved: Vec<Box<str>> = reserved.iter().map(|&segment| Box::from(segment)).collect();
         let mut collections = Vec::new();
         let mut skipped = Vec::new();
         for path in paths {
@@ -336,7 +343,7 @@ impl Collections {
             // Finding a named label forces every label anyway, so the
             // uniqueness check is free here and the set arrives resolved.
             Some(wanted) => {
-                collections = keep_unique_labels(collections, &mut skipped);
+                collections = keep_usable_labels(collections, &mut skipped, &reserved);
                 non_empty(&collections, &skipped)?;
                 index_of_label(&collections, wanted, &skipped)?
             }
@@ -345,7 +352,7 @@ impl Collections {
                 0
             }
         };
-        Ok(Collections { collections, skipped, default_index })
+        Ok(Collections { collections, skipped, default_index, reserved })
     }
 
     /// Every label resolved, and every collection whose label is unusable or
@@ -356,7 +363,8 @@ impl Collections {
     /// Free the second time: labels are cached, and a set that has been
     /// through this has nothing left to drop.
     pub fn resolve_labels(mut self) -> Result<Collections> {
-        self.collections = keep_unique_labels(std::mem::take(&mut self.collections), &mut self.skipped);
+        self.collections = keep_usable_labels(std::mem::take(&mut self.collections), &mut self.skipped, &self.reserved);
+
         non_empty(&self.collections, &self.skipped)?;
         // `default_index` is either 0, or an index into a set this already
         // ran over. Dropping the first collection therefore moves the
@@ -430,20 +438,39 @@ fn non_empty(collections: &[Collection], skipped: &[Skipped]) -> Result<()> {
     Ok(())
 }
 
-/// Drops every collection whose label is unusable or already taken, naming
-/// it in `skipped`. The first file loaded keeps a contested label.
-fn keep_unique_labels
-(loaded: Vec<Collection>, skipped: &mut Vec<Skipped>) -> Vec<Collection> {
+/// Drops every collection whose label is unusable, already taken, or one a
+/// frontend's own routes own, naming it in `skipped`. The first file loaded
+/// keeps a contested label.
+fn keep_usable_labels(loaded: Vec<Collection>, skipped: &mut Vec<Skipped>, reserved: &[Box<str>]) -> Vec<Collection> {
+    // One collection whose label cannot be resolved at all is kept: nothing
+    // can collide with it, no frontend shows a single collection's label, and
+    // `ok tui` and `ok mcp` have always worked on a ZIM carrying no `Name`
+    // metadata. `ok serve`, which needs a label for its own URLs, still
+    // refuses that set when it builds its router.
+    let alone = loaded.len() == 1;
     let mut kept: Vec<Collection> = Vec::new();
     for collection in loaded {
         let label = match collection.resolved_label() {
             Ok(label) => label.clone(),
+            Err(_) if alone => {
+                kept.push(collection);
+                continue;
+            }
             Err((reason, kind)) => {
                 skipped.push(Skipped::from_label(&collection.zim_path, reason, kind.clone()));
                 continue;
             }
         };
-
+        // Skipped like any other unusable label rather than fatal: the
+        // trigger is a `Name` inside a ZIM, so one hostile or unlucky file in
+        // a directory of good ones would otherwise take every collection
+        // down with it. A set left with nothing to serve is still an error,
+        // from `non_empty` above.
+        if reserved.iter().any(|segment| **segment == *label.as_str()) {
+            let reason = format!("the label \"{label}\" is a reserved route segment");
+            skipped.push(Skipped { path: collection.zim_path.clone(), reason, kind: SkipKind::Unusable });
+            continue;
+        }
         match kept.iter().find(|k| k.label().is_ok_and(|kept| *kept == label)) {
             Some(first) => {
                 let reason = format!("the label \"{label}\" is already taken by {}", show_path(&first.zim_path));

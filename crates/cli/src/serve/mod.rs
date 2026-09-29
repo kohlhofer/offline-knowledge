@@ -10,6 +10,7 @@ mod static_assets;
 #[cfg(test)]
 mod tests;
 
+use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,10 +38,12 @@ const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The first path segments the router owns itself. matchit gives a static
 /// segment priority over `/{collection}`, so a collection labeled with one
-/// of these would be unreachable rather than ambiguous; [`router`] refuses
-/// the set instead of serving a collection nothing can open. `wiki` is here
-/// so no collection can shadow `/wiki/{*path}`, the compatibility redirect
-/// that keeps every URL this server handed out before collections existed.
+/// of these would be unreachable rather than ambiguous, and `/wiki/x` on a
+/// collection labeled `wiki` would redirect to itself forever. `main` passes
+/// this list to `Collections::open`, which skips such a label like any other
+/// unusable one. `wiki` is here so no collection can shadow `/wiki/{*path}`,
+/// the compatibility redirect that keeps every URL this server handed out
+/// before collections existed.
 pub(crate) const RESERVED_SEGMENTS: &[&str] = &["api", "random", "search", "static", "wiki"];
 
 /// A ceiling well above any legitimate browser's concurrency and well below
@@ -51,22 +54,44 @@ const MAX_CONCURRENT_REQUESTS: usize = 64;
 /// Builds its own runtime and blocks on it: `ok serve` is the only reason
 /// this process needs an async executor at all.
 pub fn run(collections: Arc<Collections>, bind: SocketAddr) -> Result<()> {
+    eprint!("{}", announce(&collections));
     tokio::runtime::Runtime::new()?.block_on(serve(collections, bind))
 }
 
-async fn serve(collections: Arc<Collections>, bind: SocketAddr) -> Result<()> {
-    // What is being served, before where: in the container one new ZIM can
-    // change which collection the home page and the brand belong to, and a
-    // line saying only "listening" leaves that invisible. Article counts
-    // come from each index's `meta.json`, so this opens nothing.
+/// What `ok serve` says before it binds, and the default collection opened
+/// while it says it.
+///
+/// The lines say what is being served before saying where: in the container
+/// one new ZIM can change which collection the home page and the brand
+/// belong to, and a line saying only "listening" leaves that invisible.
+/// Article counts come from each index's `meta.json`, so nothing is opened
+/// for them.
+///
+/// The default collection is opened here, before the runtime exists, the way
+/// every open happened before collections were lazy: it is 20 ms cold, and
+/// it otherwise lands inside the first request this server answers, after
+/// the startup line has already promised a server that can answer. A failure
+/// is that collection's own 503 later, not a reason not to serve the others.
+fn announce(collections: &Collections) -> String {
+    let mut out = String::new();
     for (i, collection) in collections.iter().enumerate() {
         let Ok(label) = collection.label() else { continue };
         let default = if i == collections.default_index() { " (default)" } else { "" };
-        eprintln!("{label}{default}  {}  {} articles", sanitize_line(collection.title()), collection.article_count());
+        let _ = writeln!(out, "{label}{default}  {}  {} articles", sanitize_line(collection.title()), collection.article_count());
     }
+    if let Err(e) = collections.default().library() {
+        let _ = writeln!(out, "warning: the default collection could not be opened: {e}");
+    }
+    out
+}
+
+async fn serve(collections: Arc<Collections>, bind: SocketAddr) -> Result<()> {
+    // Before the port: `router` is fallible, and binding first meant
+    // printing "listening on ..." and then exiting.
+    let app = router(collections)?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
     eprintln!("listening on http://{bind}");
-    accept_loop(listener, collections, HEADER_READ_TIMEOUT).await
+    accept_loop(listener, app, HEADER_READ_TIMEOUT).await
 }
 
 /// A descriptor-exhaustion flood must not take the process down: an accept
@@ -81,8 +106,7 @@ const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 /// [`HEADER_READ_TIMEOUT`]. Bypasses `axum::serve` (which builds a
 /// [`ConnBuilder`] with no timer and no header-read timeout of its own) so
 /// this timeout can be set at all.
-async fn accept_loop(listener: tokio::net::TcpListener, collections: Arc<Collections>, header_read_timeout: Duration) -> Result<()> {
-    let app = router(collections)?;
+async fn accept_loop(listener: tokio::net::TcpListener, app: Router, header_read_timeout: Duration) -> Result<()> {
     loop {
         let (stream, _addr) = match listener.accept().await {
             Ok(pair) => pair,
@@ -125,18 +149,15 @@ struct AppState {
     cache: ArticleCache,
 }
 
-/// Resolves every label, refuses a set that would shadow a route of its
-/// own, and wires the routes up. Fallible for both reasons: an unusable set
-/// must stop `ok serve` starting rather than serve a collection no URL can
-/// reach.
+/// Resolves every label and wires the routes up. Fallible because a label
+/// is: a set with one it cannot resolve must stop `ok serve` starting rather
+/// than serve a collection no URL can reach. A label that would shadow one
+/// of these routes is gone before this runs, skipped by
+/// `Collections::resolve_labels` along with every other unusable one.
 pub(crate) fn router(collections: Arc<Collections>) -> Result<Router> {
     let mut labels = Vec::with_capacity(collections.len());
     for collection in collections.iter() {
-        let label = collection.label()?;
-        if RESERVED_SEGMENTS.contains(&label.as_str()) {
-            anyhow::bail!("a collection cannot be labeled \"{label}\": /{label} is already this server's own route");
-        }
-        labels.push(label.clone());
+        labels.push(collection.label()?.clone());
     }
     let state = AppState { collections, labels: labels.into(), cache: ArticleCache::new() };
     Ok(Router::new()

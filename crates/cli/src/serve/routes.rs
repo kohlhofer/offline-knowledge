@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use axum::extract::{Path as AxumPath, Query, RawQuery, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
-use ok_core::{Library, Resolution};
+use ok_core::{Collections, Library, Resolution};
 use serde::Deserialize;
 
 use super::AppState;
@@ -128,24 +128,41 @@ fn at(state: &AppState, index: usize) -> Active<'_> {
     Active { collections: &state.collections, labels: &state.labels, index }
 }
 
-/// The active collection's library, or `None` for a collection that failed
-/// to open. Opening is lazy, so a ZIM that no longer matches its index
-/// surfaces here rather than at startup; the detail goes to stderr on the
-/// one open that failed, and the outcome is cached, so neither the open nor
-/// the line repeats. Every caller answers a `None` with
-/// [`unavailable_html`].
-fn library_of(active: &Active) -> Option<Arc<Library>> {
-    let collection = active.collection();
-    let first_attempt = collection.failure().is_none();
-    match collection.library() {
-        Ok(library) => Some(library),
-        Err(e) => {
-            if first_attempt {
-                eprintln!("503: collection \"{}\" could not be opened: {e}", active.label());
-            }
-            None
-        }
+/// What a blocking handler task can fail with: the collection could not be
+/// opened at all, which is a 503, or the work itself failed, which is a 500.
+enum TaskError {
+    Unavailable,
+    Failed(ok_core::Error),
+}
+
+impl From<ok_core::Error> for TaskError {
+    fn from(e: ok_core::Error) -> TaskError {
+        TaskError::Failed(e)
     }
+}
+
+/// The collection's library, opened inside the blocking task that needs it
+/// rather than on the async task that spawned it. `Library::open` reads
+/// `inbound.u32` and `stubs.bin`, mmaps the title FST and opens Tantivy
+/// (20 ms cold), and `OnceLock::get_or_init` makes every concurrent
+/// first-requester wait on whichever thread runs it, which must therefore
+/// not be a tokio worker. Before collections every open happened before the
+/// runtime existed; `ok mcp` has always done it inside `run_blocking`.
+///
+/// Opening is lazy, so a ZIM that no longer matches its index surfaces here
+/// rather than at startup; the detail goes to stderr on the one open that
+/// failed, and the outcome is cached, so neither the open nor the line
+/// repeats. Every caller answers [`TaskError::Unavailable`] with
+/// [`unavailable_html`].
+fn library_in_task(collections: &Collections, index: usize, label: &str) -> Result<Arc<Library>, TaskError> {
+    let collection = collections.at(index).ok_or(TaskError::Unavailable)?;
+    let first_attempt = collection.failure().is_none();
+    collection.library().map_err(|e| {
+        if first_attempt {
+            eprintln!("503: collection \"{label}\" could not be opened: {e}");
+        }
+        TaskError::Unavailable
+    })
 }
 
 /// The 503 a failed collection's pages serve: its label and one fixed
@@ -242,20 +259,25 @@ pub async fn search(State(state): State<AppState>, Query(params): Query<SearchPa
     if q.trim().is_empty() {
         return html_ok("no-cache", page::shell("Search", Some(&active), None, &page::search_prompt_body()));
     }
-    let Some(library) = library_of(&active) else { return unavailable_html(&active) };
     let limit = params.limit.unwrap_or(30).clamp(1, 50);
-    let lib = Arc::clone(&library);
+    let collections = Arc::clone(&state.collections);
+    let index = active.index;
+    let label = active.label().to_string();
     let query = q.clone();
-    let rows = match tokio::task::spawn_blocking(move || -> ok_core::Result<Vec<SearchRow>> {
-        lib.search(&query, limit)?
+    let rows = match tokio::task::spawn_blocking(move || -> Result<Vec<SearchRow>, TaskError> {
+        let lib = library_in_task(&collections, index, &label)?;
+        let rows: ok_core::Result<Vec<SearchRow>> = lib
+            .search(&query, limit)?
             .into_iter()
             .map(|r| Ok(SearchRow { title: r.title, path: lib.path(r.article)?, summary: r.summary }))
-            .collect()
+            .collect();
+        Ok(rows?)
     })
     .await
     {
         Ok(Ok(rows)) => rows,
-        Ok(Err(e)) => return server_error_html(&e),
+        Ok(Err(TaskError::Unavailable)) => return unavailable_html(&active),
+        Ok(Err(TaskError::Failed(e))) => return server_error_html(&e),
         Err(e) => return server_error_html(e),
     };
     let page_title = format!("\"{q}\" — search");
@@ -281,11 +303,13 @@ pub async fn api_suggest(State(state): State<AppState>, Query(params): Query<Sug
         )
             .into_response();
     }
-    let Some(library) = library_of(&active) else { return unavailable_html(&active) };
     let limit = params.limit.unwrap_or(12).clamp(1, 50);
-    let lib = Arc::clone(&library);
+    let collections = Arc::clone(&state.collections);
+    let index = active.index;
+    let label = active.label().to_string();
     let base = active.base();
-    let dtos = match tokio::task::spawn_blocking(move || -> ok_core::Result<Vec<SuggestDto>> {
+    let dtos = match tokio::task::spawn_blocking(move || -> Result<Vec<SuggestDto>, TaskError> {
+        let lib = library_in_task(&collections, index, &label)?;
         Ok(lib
             .suggest(&q, limit)?
             .into_iter()
@@ -299,7 +323,8 @@ pub async fn api_suggest(State(state): State<AppState>, Query(params): Query<Sug
     .await
     {
         Ok(Ok(dtos)) => dtos,
-        Ok(Err(e)) => return suggest_error_json(e),
+        Ok(Err(TaskError::Unavailable)) => return unavailable_html(&active),
+        Ok(Err(TaskError::Failed(e))) => return suggest_error_json(e),
         Err(e) => return suggest_error_json(e),
     };
     (StatusCode::OK, [(header::CACHE_CONTROL, "no-store")], axum::Json(dtos)).into_response()
@@ -376,19 +401,23 @@ pub async fn article(
         return unknown_collection_html(&state, &format!("{label}/{path}"), &label);
     };
     let active = at(&state, index);
-    let Some(library) = library_of(&active) else { return unavailable_html(&active) };
-
     // Cosmetic only (the banner below): an oversized value is ignored
     // rather than failing the whole page load over it.
     let redirected_from = params.redirected_from.filter(|s| !query_too_long(s));
-    let lib = Arc::clone(&library);
+    let collections = Arc::clone(&state.collections);
+    let label = active.label().to_string();
     let cache = state.cache.clone();
     let requested = path.clone();
-    let base = active.base();
-    let rendering = base.clone();
-    let outcome = match tokio::task::spawn_blocking(move || render_article(&lib, &cache, index, &rendering, &requested)).await {
+    let rendering = active.base();
+    let outcome = match tokio::task::spawn_blocking(move || -> Result<ArticleOutcome, TaskError> {
+        let lib = library_in_task(&collections, index, &label)?;
+        Ok(render_article(&lib, &cache, index, &rendering, &requested)?)
+    })
+    .await
+    {
         Ok(Ok(outcome)) => outcome,
-        Ok(Err(e)) => return server_error_html(&e),
+        Ok(Err(TaskError::Unavailable)) => return unavailable_html(&active),
+        Ok(Err(TaskError::Failed(e))) => return server_error_html(&e),
         Err(e) => return server_error_html(e),
     };
     match outcome {
@@ -441,9 +470,24 @@ pub struct RandomParams {
 
 pub async fn random(State(state): State<AppState>, Query(params): Query<RandomParams>) -> Response {
     let active = active(&state, params.c.as_deref());
-    let Some(library) = library_of(&active) else { return unavailable_html(&active) };
     let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
-    match library.random_article(seed).and_then(|entry| library.path(entry).ok()) {
+    let collections = Arc::clone(&state.collections);
+    let index = active.index;
+    let label = active.label().to_string();
+    // The pick itself is two ZIM reads, but the open in front of it is 20 ms
+    // cold, and this is the route a reader reaches from a keypress.
+    let picked = match tokio::task::spawn_blocking(move || -> Result<Option<String>, TaskError> {
+        let lib = library_in_task(&collections, index, &label)?;
+        Ok(lib.random_article(seed).and_then(|entry| lib.path(entry).ok()))
+    })
+    .await
+    {
+        Ok(Ok(picked)) => picked,
+        Ok(Err(TaskError::Unavailable)) => return unavailable_html(&active),
+        Ok(Err(TaskError::Failed(e))) => return server_error_html(&e),
+        Err(e) => return server_error_html(e),
+    };
+    match picked {
         Some(path) => (
             StatusCode::FOUND,
             [(header::LOCATION, ok_core::html::article_href(&active.base(), &path, None)), (header::CACHE_CONTROL, "no-store".to_string())],

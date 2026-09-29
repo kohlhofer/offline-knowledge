@@ -22,7 +22,16 @@ use serde::Deserialize;
 /// Builds its own runtime and blocks on it, like `serve::run` — the default
 /// TUI and every other subcommand pay zero tokio startup cost.
 pub fn run(collections: Arc<Collections>) -> Result<()> {
+    // The default collection, opened before stdio is served rather than
+    // inside the first `tools/call` an agent makes: 6.9 ms of `Library::open`
+    // that the handshake otherwise hides in the first answer. A failure is
+    // that collection's own tool-level error later, not a reason not to
+    // serve the others.
+    if let Err(e) = collections.default().library() {
+        eprintln!("mcp: the default collection could not be opened: {e}");
+    }
     tokio::runtime::Runtime::new()?.block_on(async {
+
         let service = Mcp::new(collections).serve(rmcp::transport::stdio()).await?;
         service.waiting().await?;
         Ok(())

@@ -72,7 +72,7 @@ fn write_imported(dir: &std::path::Path, file: &str, bytes: Vec<u8>) -> std::pat
 }
 
 fn set_over(paths: &[std::path::PathBuf]) -> Arc<Collections> {
-    Arc::new(Collections::open(paths, None).unwrap())
+    Arc::new(Collections::open(paths, None, &[]).unwrap().resolve_labels().unwrap())
 }
 
 /// The shared fixture as a set, for the end-to-end tests that need a real

@@ -67,7 +67,7 @@ fn imported(dir: &std::path::Path, file: &str, bytes: Vec<u8>) -> std::path::Pat
 
 /// An `App` over a set of imported ZIMs, the first one active.
 fn app_over(paths: &[std::path::PathBuf]) -> App {
-    let collections = Arc::new(Collections::open(paths, None).unwrap());
+    let collections = Arc::new(Collections::open(paths, None, &[]).unwrap().resolve_labels().unwrap());
     let library = collections.default().library().unwrap();
     App::new(collections, library, 80, 24)
 }

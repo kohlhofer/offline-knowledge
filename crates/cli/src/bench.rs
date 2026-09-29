@@ -264,7 +264,7 @@ mod tests {
         let zim = dir.path().join("t.zim");
         std::fs::write(&zim, bytes).unwrap();
         ok_core::import::import(&zim, &ok_core::import::ImportOptions { heap_bytes: 20_000_000 }, &|_| {}).unwrap();
-        let collections = Arc::new(Collections::open(&[zim], None).unwrap());
+        let collections = Arc::new(Collections::open(&[zim], None, &[]).unwrap());
         run(collections, Duration::ZERO, Duration::ZERO, 5, true, false).unwrap();
     }
 }

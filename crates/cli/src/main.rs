@@ -94,7 +94,7 @@ fn main() -> Result<()> {
             // Not through `loaded`: the report below owns the skipped lines
             // for this one command, so they are not printed to stderr first
             // and then again to stdout around the loaded list.
-            print!("{}", collections_report(&Collections::open(&paths, wanted)?.resolve_labels()?)?);
+            print!("{}", collections_report(&Collections::open(&paths, wanted, serve::RESERVED_SEGMENTS)?.resolve_labels()?)?);
             Ok(())
         }
         Command::Tui => tui::run(set(&paths, wanted)?),
@@ -218,7 +218,7 @@ fn zim_paths(given: &[PathBuf]) -> Result<Vec<PathBuf>> {
 /// stderr. Unconditional: a file dropped into the directory that goes
 /// nowhere must not go nowhere silently.
 fn loaded(paths: &[PathBuf], collection: Option<&str>) -> Result<Collections> {
-    let collections = Collections::open(paths, collection)?;
+    let collections = Collections::open(paths, collection, serve::RESERVED_SEGMENTS)?;
     for skipped in collections.skipped() {
         eprintln!("skipped {}: {}", show_path(&skipped.path), skipped.reason);
     }
@@ -444,7 +444,7 @@ mod tests {
         zim(dir.path(), "b.zim", "wiktionary_en_all", "mwoffliner 1.17.5", &["Mercury"]);
         let paths = zim_paths(&[dir.path().to_path_buf()]).unwrap();
 
-        let report = collections_report(&Collections::open(&paths, None).unwrap()).unwrap();
+        let report = collections_report(&Collections::open(&paths, None, &[]).unwrap().resolve_labels().unwrap()).unwrap();
         assert!(report.contains("wikipedia (default)"), "{report}");
         assert!(report.contains("failed:"), "an index that no longer matches its ZIM is named failed: {report}");
         let skipped = report.lines().find(|l| l.starts_with("skipped ")).unwrap_or_default();

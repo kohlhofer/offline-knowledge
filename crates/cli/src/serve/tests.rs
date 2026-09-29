@@ -67,6 +67,13 @@ fn dictionary_bytes() -> Vec<u8> {
         .build()
 }
 
+/// The set `serve` is always handed: `main::set` resolves every label before
+/// `router` sees it, so a label already another file's, or one of this
+/// router's own segments, is gone by then.
+fn resolved(paths: &[std::path::PathBuf]) -> Collections {
+    Collections::open(paths, None, RESERVED_SEGMENTS).unwrap().resolve_labels().unwrap()
+}
+
 fn write_imported(dir: &std::path::Path, file: &str, bytes: Vec<u8>) -> std::path::PathBuf {
     let zim = dir.join(file);
     std::fs::write(&zim, bytes).unwrap();
@@ -78,7 +85,7 @@ fn write_imported(dir: &std::path::Path, file: &str, bytes: Vec<u8>) -> std::pat
 fn one() -> (tempfile::TempDir, Arc<Collections>) {
     let dir = tempfile::tempdir().unwrap();
     let zim = write_imported(dir.path(), "wikipedia.zim", wiki_bytes());
-    (dir, Arc::new(Collections::open(&[zim], None).unwrap()))
+    (dir, Arc::new(resolved(&[zim])))
 }
 
 /// Two collections: `wikipedia` (the default) and `wiktionary`.
@@ -86,7 +93,7 @@ fn two() -> (tempfile::TempDir, Arc<Collections>) {
     let dir = tempfile::tempdir().unwrap();
     let a = write_imported(dir.path(), "wikipedia.zim", wiki_bytes());
     let b = write_imported(dir.path(), "wiktionary.zim", dictionary_bytes());
-    (dir, Arc::new(Collections::open(&[a, b], None).unwrap()))
+    (dir, Arc::new(resolved(&[a, b])))
 }
 
 fn app() -> (tempfile::TempDir, Router) {
@@ -408,7 +415,7 @@ async fn static_assets_are_served_with_a_long_cache_lifetime() {
 #[ignore]
 async fn chrome_smoke() {
     let zim = std::path::PathBuf::from(std::env::var("OK_ZIM").expect("OK_ZIM"));
-    let collections = Collections::open(&[zim], None).expect("ok import must have already run");
+    let collections = Collections::open(&[zim], None, RESERVED_SEGMENTS).expect("ok import must have already run").resolve_labels().unwrap();
     let label = collections.default().label().unwrap().to_string();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -464,7 +471,7 @@ async fn half_open_connection_is_closed_after_the_header_read_timeout() {
     let (_d, collections) = one();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(super::accept_loop(listener, collections, std::time::Duration::from_millis(150)));
+    let server = tokio::spawn(super::accept_loop(listener, router(collections).unwrap(), std::time::Duration::from_millis(150)));
 
     let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     stream.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n").await.unwrap();
@@ -489,7 +496,7 @@ async fn accept_loop_flood_worker() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     println!("PORT={}", listener.local_addr().unwrap().port());
     std::io::Write::flush(&mut std::io::stdout()).unwrap();
-    let _ = super::accept_loop(listener, collections, std::time::Duration::from_secs(5)).await;
+    let _ = super::accept_loop(listener, router(collections).unwrap(), std::time::Duration::from_secs(5)).await;
 }
 
 /// The regression this guards: `listener.accept().await?` used to propagate
@@ -659,7 +666,7 @@ fn two_and_a_skipped_file() -> (tempfile::TempDir, Arc<Collections>) {
     let b = write_imported(dir.path(), "wiktionary.zim", dictionary_bytes());
     let stray = dir.path().join("stray.zim");
     std::fs::write(&stray, wiki_bytes()).unwrap();
-    (dir, Arc::new(Collections::open(&[a, b, stray], None).unwrap()))
+    (dir, Arc::new(resolved(&[a, b, stray])))
 }
 
 /// Two collections, the second one's ZIM replaced after import: its index no
@@ -670,7 +677,7 @@ fn two_with_a_failed_collection() -> (tempfile::TempDir, Arc<Collections>) {
     let a = write_imported(dir.path(), "wikipedia.zim", wiki_bytes());
     let b = write_imported(dir.path(), "wiktionary.zim", dictionary_bytes());
     std::fs::write(&b, wiki_bytes()).unwrap();
-    (dir, Arc::new(Collections::open(&[a, b], None).unwrap()))
+    (dir, Arc::new(resolved(&[a, b])))
 }
 
 /// Every `/wiki/{path}` URL this server ever handed out still lands, and the
@@ -827,22 +834,71 @@ async fn the_switcher_shows_labels_marks_the_active_one_and_does_not_link_a_fail
     assert!(!body.contains(r#"href="/wiktionary""#), "a failed collection is not linked: {body}");
 }
 
-/// Both directions, so neither half can rot: a collection that would shadow
-/// one of this router's own segments stops `ok serve` starting, and every
-/// segment in the list still reaches its own handler.
+/// A ZIM whose metadata yields one of this router's own segments. The set is
+/// built from untrusted `Name` fields in a directory the appliance watches,
+/// so one such file is skipped and named, exactly like any other unusable
+/// label: it used to make `router` bail, which meant `ok serve` bound the
+/// port, printed "listening on ...", and exited with three good collections
+/// dark.
 #[tokio::test]
-async fn no_collection_may_take_a_reserved_segment_and_every_one_still_reaches_its_handler() {
+async fn a_collection_taking_a_reserved_segment_is_skipped_and_the_rest_still_serve() {
     let dir = tempfile::tempdir().unwrap();
-    let bytes = ZimBuilder::new()
+    let hostile = ZimBuilder::new()
         .article("Query", "Query", &page("Query", "<p>About queries.</p>"))
         .metadata("Title", "Tiny search")
         .metadata("Name", "search_en_all")
         .metadata("Scraper", "mwoffliner 1.17.5")
         .build();
-    let zim = write_imported(dir.path(), "search.zim", bytes);
-    let err = router(Arc::new(Collections::open(&[zim], None).unwrap())).err().unwrap().to_string();
-    assert!(err.contains("search") && err.contains("/search"), "the refusal names the route it would shadow: {err}");
+    let a = write_imported(dir.path(), "wikipedia.zim", wiki_bytes());
+    let b = write_imported(dir.path(), "wiktionary.zim", dictionary_bytes());
+    let squatter = write_imported(dir.path(), "search.zim", hostile);
 
+    let collections = Arc::new(resolved(&[a, b, squatter.clone()]));
+    assert_eq!(collections.len(), 2, "the two good collections are still there");
+    assert_eq!(collections.skipped()[0].path, squatter, "and the offender is named");
+    assert!(collections.skipped()[0].reason.contains("reserved"), "{}", collections.skipped()[0].reason);
+
+    let app = router(collections).unwrap();
+    assert_eq!(get(&app, "/wikipedia/Albert_Einstein").await.status(), StatusCode::OK);
+    assert_eq!(get(&app, "/search?q=physics").await.status(), StatusCode::OK, "the route it would have shadowed still answers");
+    let body = body_text(get(&app, "/").await).await;
+    assert!(body.contains("search.zim") && body.contains("not usable"), "`/` says the file went nowhere: {body}");
+
+    // With nothing left to serve it is still an error, which is the half of
+    // the old behavior worth keeping.
+    let alone = Collections::open(&[squatter], None, RESERVED_SEGMENTS).unwrap().resolve_labels().err().unwrap().to_string();
+    assert!(alone.contains("search.zim") && alone.contains("reserved"), "{alone}");
+}
+
+/// The startup lines, and the promise behind them. `ok serve` printed
+/// failures and "listening on ..." and never what it had loaded or which
+/// collection was the default, and the default collection's 20 ms
+/// `Library::open` landed inside the first request rather than before the
+/// line that says the server is up.
+#[tokio::test]
+async fn the_startup_lines_name_every_collection_and_open_the_default() {
+    let (_d, collections) = two();
+    assert!(collections.iter().all(|c| !c.is_open()), "nothing is open before this");
+
+    let lines = super::announce(&collections);
+    assert!(lines.contains("wikipedia (default)  Tiny wiki  2 articles"), "{lines}");
+    assert!(lines.contains("wiktionary  Tiny dictionary  2 articles"), "{lines}");
+    assert!(!lines.contains("(default)  Tiny dictionary"), "only one of them is the default: {lines}");
+    assert!(collections.default().is_open(), "the default is open before the startup line promises a server");
+    assert!(!collections.get("wiktionary").unwrap().is_open(), "and only the default: the rest stay lazy");
+
+    // A default that cannot be opened is said out loud and is still not a
+    // reason to refuse to serve the others.
+    let (_d, collections) = two_with_a_failed_collection();
+    let lines = super::announce(&collections);
+    assert!(lines.contains("wikipedia (default)"), "{lines}");
+    assert!(!lines.contains("warning"), "the default here is the healthy one: {lines}");
+}
+
+/// Every segment in the reserved list still reaches its own handler, so the
+/// other half of the rule cannot rot either.
+#[tokio::test]
+async fn every_reserved_segment_still_reaches_its_own_handler() {
     let (_d, app) = app_two();
     let probes = [
         ("api", "/api/suggest?q=albert", StatusCode::OK),
