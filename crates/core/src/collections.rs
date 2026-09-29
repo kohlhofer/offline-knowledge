@@ -9,6 +9,7 @@
 //! probe used to add a hint to a miss.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use ok_zim::Archive;
@@ -116,6 +117,14 @@ pub struct Collection {
     /// not retry that on every request. A race can open it twice and drop
     /// one result, which is harmless and keeps the hot path lock-free.
     library: OnceLock<std::result::Result<Arc<Library>, Arc<str>>>,
+    /// Whether [`check_scraper`] has already passed here, so
+    /// [`Self::open_library`] does not decompress the metadata cluster a
+    /// second time for a `Scraper` [`Self::load`] read from `meta.json` for
+    /// nothing or [`Self::read_label`] has just read from the ZIM: 0.99 ms a
+    /// collection a process, and every frontend that shows a label paid it
+    /// twice. A hint rather than a fact, so `Relaxed` is enough: losing the
+    /// race costs one more read of an answer that does not change.
+    scraper_checked: AtomicBool,
     /// Separate from `library`, and far cheaper: the miss hint opens only
     /// `titles.fst`, a `File::open` and an mmap. `None` when it cannot be
     /// opened, which costs that collection its hints and nothing else.
@@ -128,10 +137,14 @@ impl Collection {
     fn load(zim_path: &Path) -> Result<Collection> {
         let meta = IndexMeta::read(zim_path)?;
         let label = OnceLock::new();
-        if let Some(name) = &meta.name {
-            // A new-format index records what the ZIM said, so both checks
-            // are free here; a legacy one defers them to `label`.
+        // A new-format index records what the ZIM said, so both checks are
+        // free here and neither is paid again; a legacy one records neither
+        // and defers them to `read_label` and `open_library`.
+        let recorded = meta.name.is_some() || meta.scraper.is_some();
+        if recorded {
             check_scraper(zim_path, meta.scraper.as_deref())?;
+        }
+        if let Some(name) = &meta.name {
             let _ = label.set(Ok(label_from_name(name)?));
         }
         Ok(Collection {
@@ -141,6 +154,7 @@ impl Collection {
             article_count: meta.articles,
             label,
             library: OnceLock::new(),
+            scraper_checked: AtomicBool::new(recorded),
             titles: OnceLock::new(),
         })
     }
@@ -191,6 +205,7 @@ impl Collection {
     fn read_label(&self) -> Result<Label> {
         let archive = Archive::open(&self.zim_path)?;
         check_scraper(&self.zim_path, archive.metadata("Scraper")?.as_deref())?;
+        self.scraper_checked.store(true, Ordering::Relaxed);
         label_from_name(archive.metadata("Name")?.as_deref().unwrap_or_default())
     }
 
@@ -207,17 +222,21 @@ impl Collection {
         }
     }
 
-    /// [`Library::open`] with the scraper gate on top. [`Self::load`] can only
-    /// apply that gate when the index recorded a scraper and [`Self::label`]
-    /// only when it resolves a label from the ZIM, so for a single collection
-    /// on an index that predates `IndexMeta.scraper` — which is every index
-    /// built before this version — neither ran: `ok suggest`, `search`, `show`
-    /// and `tui` read a sotoki or devdocs ZIM as mwoffliner's while `ok serve`
-    /// refused to start on it. The archive is open here either way, so this is
-    /// where the gate belongs.
+    /// [`Library::open`] with the scraper gate on top, for the collections
+    /// nothing has applied it to yet. [`Self::load`] can only apply it when
+    /// the index recorded a scraper and [`Self::label`] only when it resolves
+    /// a label from the ZIM, so for a single collection on an index that
+    /// predates `IndexMeta.scraper` — which is every index built before this
+    /// version — neither ran: `ok suggest`, `search`, `show` and `tui` read a
+    /// sotoki or devdocs ZIM as mwoffliner's while `ok serve` refused to start
+    /// on it. The archive is open here either way, so this is where the gate
+    /// belongs for them; for the rest the answer is already in hand, and
+    /// reading `Scraper` again decompresses the metadata cluster twice.
     fn open_library(&self) -> Result<Library> {
         let library = Library::open(&self.zim_path)?;
-        check_scraper(&self.zim_path, library.archive().metadata("Scraper")?.as_deref())?;
+        if !self.scraper_checked.load(Ordering::Relaxed) {
+            check_scraper(&self.zim_path, library.archive().metadata("Scraper")?.as_deref())?;
+        }
         Ok(library)
     }
 

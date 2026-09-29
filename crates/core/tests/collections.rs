@@ -413,6 +413,36 @@ fn a_single_legacy_collection_still_refuses_a_zim_another_scraper_wrote() {
     assert_eq!(set.default().library().unwrap().article_count(), 1);
 }
 
+/// One metadata read decides the gate, not two. Opening a library read the
+/// ZIM's `Scraper` again from the compressed metadata cluster that reading
+/// the label had just decompressed, and read it even where `meta.json` had
+/// recorded the answer at load for nothing: 0.99 ms a collection a process,
+/// paid by every frontend that shows a label. Swapping the ZIM for one whose
+/// `Scraper` says otherwise, same length so the index still matches it, is
+/// what makes a second read visible at all.
+#[test]
+fn the_mwoffliner_gate_costs_one_metadata_read_per_collection() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // `meta.json` recorded the scraper, so `load` settled this for free.
+    let recorded = imported(dir.path(), "a.zim", "wikipedia_en_top", "Best of Wikipedia", &["Albert Einstein"]);
+    build(dir.path(), "a.zim", "wikipedia_en_top", "Best of Wikipedia", Some("sotoki-zim 1.17.5"), &["Albert Einstein"]);
+    let set = Collections::open(std::slice::from_ref(&recorded), None, &[]).unwrap();
+    assert_eq!(set.default().library().unwrap().article_count(), 1, "the index already said what wrote this file");
+
+    // And on the legacy path, where the answer comes from the ZIM: reading
+    // the label reads `Scraper` and passes it, so opening reads neither.
+    let legacy = imported(dir.path(), "b.zim", "wiktionary_en-simple_all", "Wiktionary", &["Mercury"]);
+    rewrite_meta(&legacy, |m| {
+        m.name = None;
+        m.scraper = None;
+    });
+    let set = Collections::open(std::slice::from_ref(&legacy), None, &[]).unwrap();
+    assert_eq!(set.default().label().unwrap().as_str(), "wiktionary", "which reads Scraper and Name in one go");
+    build(dir.path(), "b.zim", "wiktionary_en-simple_all", "Wiktionary", Some("sotoki-zim 1.17.5"), &["Mercury"]);
+    assert_eq!(set.default().library().unwrap().article_count(), 1, "the gate was passed when the label was read");
+}
+
 /// The refusal runs before any work: a 90-second import must not end in
 /// "wrong scraper", and one parser, one ranking and one renderer are what
 /// restricting `ok` to mwoffliner's HTML buys.
